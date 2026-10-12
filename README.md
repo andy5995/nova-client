@@ -1,6 +1,6 @@
 # Nova Client
 
-Syncs BBS door-game packets with a [Nova Hub](https://gitea-hl/lime/nova-hub), and runs
+Syncs BBS door-game packets with a [Nova Hub](https://github.com/lime-red/nova-hub), and runs
 game maintenance when packets arrive. Supports **Barren Realms Elite** and **Falcon's Eye**
 inter-BBS leagues.
 
@@ -91,34 +91,16 @@ python/       Python client — client.py (one-shot), daemon.py (continuous)
 powershell/   PowerShell client — Windows only. Two launchers (5.1 and 7+) over
               one shared NovaClient.Common.ps1; deploy the folder, not a file.
 linux/        systemd unit and shell helpers
+openapi/      the hub's Service API spec, generated from the hub (see openapi/README.md)
 VERSION       current release
 CHANGELOG.md  what changed and when
 ```
 
-## Upgrading from 0.2.0 or earlier
+## Upgrading
 
-**The Python client moved into `python/`.** Nothing about how it works changed, but paths did.
-After pulling this release, update wherever you launch it from:
-
-| | Before | After |
-|---|---|---|
-| systemd | `WorkingDirectory=/home/lime/nova-client` | `WorkingDirectory=/home/lime/nova-client/python` |
-| Windows | `cd C:\BBS\nova-client` | `cd C:\BBS\nova-client\python` |
-| CI / scripts | `pytest` at the repo root | `cd python && pytest` |
-| Config | `config.toml` at the repo root | `python/config.toml` |
-
-Move your config with the code — it belongs next to the client that reads it, which is where
-`client.py --validate` looks by default:
-
-```bash
-mv /home/lime/nova-client/config.toml /home/lime/nova-client/python/
-```
-
-[`linux/nova-client.service`](linux/nova-client.service) still passes it by absolute path, so a
-wrong `WorkingDirectory` fails loudly rather than quietly loading a different file.
-
-Pull, update the path, restart, in that order. A node that pulls while its service is running
-will keep working until the next restart, but do not leave it in that state.
+Read the release notes for every version between yours and the latest, in
+[CHANGELOG.md](CHANGELOG.md) or on the Releases page. A release that needs you to do something
+says so under **Upgrading**.
 
 ## Licence
 

@@ -16,8 +16,9 @@ journalctl -u nova-client -f
 
 The unit assumes:
 
-- the repo checked out at `/home/lime/nova-client`,
-- its virtualenv at the repo root (`/home/lime/nova-client/.venv`),
+- the repo checked out at `/opt/nova-client` (change it to wherever you cloned it),
+- its virtualenv at the repo root (`/opt/nova-client/.venv`),
+- a user and group called `nova` that owns the BBS and game files,
 - the Python client in `python/` (this is where it moved in 0.3.0),
 - `config.toml` in `python/` alongside the code — the same place `python/README.md` tells you
   to create it, and where `client.py --validate` looks by default. The unit still passes it by
@@ -27,7 +28,7 @@ The unit assumes:
 If you are upgrading from 0.2.0, your `config.toml` was at the repo root. Move it:
 
 ```bash
-mv /home/lime/nova-client/config.toml /home/lime/nova-client/python/
+mv /opt/nova-client/config.toml /opt/nova-client/python/
 ```
 
 ### Keeping credentials out of the checkout

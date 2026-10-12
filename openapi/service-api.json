@@ -1,0 +1,637 @@
+{
+  "components": {
+    "schemas": {
+      "Account": {
+        "properties": {
+          "bbs_name": {
+            "title": "Bbs Name",
+            "type": "string"
+          },
+          "client_id": {
+            "title": "Client Id",
+            "type": "string"
+          },
+          "leagues": {
+            "items": {
+              "$ref": "#/components/schemas/AccountLeague"
+            },
+            "title": "Leagues",
+            "type": "array"
+          }
+        },
+        "required": [
+          "client_id",
+          "bbs_name",
+          "leagues"
+        ],
+        "title": "Account",
+        "type": "object"
+      },
+      "AccountLeague": {
+        "properties": {
+          "bbs_index": {
+            "title": "Bbs Index",
+            "type": "integer"
+          },
+          "fidonet_address": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fidonet Address"
+          },
+          "game": {
+            "title": "Game",
+            "type": "string"
+          },
+          "league_id": {
+            "title": "League Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "number": {
+            "title": "Number",
+            "type": "string"
+          }
+        },
+        "required": [
+          "league_id",
+          "game",
+          "number",
+          "name",
+          "bbs_index"
+        ],
+        "title": "AccountLeague",
+        "type": "object"
+      },
+      "Body_login_for_access_token_api_v1_auth_token_post": {
+        "properties": {
+          "client_id": {
+            "description": "Your client ID provided by the hub administrator",
+            "title": "Client Id",
+            "type": "string"
+          },
+          "client_secret": {
+            "description": "Your client secret provided by the hub administrator",
+            "title": "Client Secret",
+            "type": "string"
+          },
+          "grant_type": {
+            "description": "Must be 'client_credentials'",
+            "title": "Grant Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "grant_type",
+          "client_id",
+          "client_secret"
+        ],
+        "title": "Body_login_for_access_token_api_v1_auth_token_post",
+        "type": "object"
+      },
+      "ClientVerifyResponse": {
+        "description": "Response for token verification",
+        "properties": {
+          "bbs_name": {
+            "title": "Bbs Name",
+            "type": "string"
+          },
+          "client_id": {
+            "title": "Client Id",
+            "type": "string"
+          },
+          "is_active": {
+            "title": "Is Active",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "client_id",
+          "bbs_name",
+          "is_active"
+        ],
+        "title": "ClientVerifyResponse",
+        "type": "object"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "title": "Detail",
+            "type": "array"
+          }
+        },
+        "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "PacketInfo": {
+        "description": "Basic packet information",
+        "properties": {
+          "dest": {
+            "title": "Dest",
+            "type": "string"
+          },
+          "file_size": {
+            "title": "File Size",
+            "type": "integer"
+          },
+          "filename": {
+            "title": "Filename",
+            "type": "string"
+          },
+          "game_type": {
+            "title": "Game Type",
+            "type": "string"
+          },
+          "league": {
+            "title": "League",
+            "type": "string"
+          },
+          "received_at": {
+            "format": "date-time",
+            "title": "Received At",
+            "type": "string"
+          },
+          "retrieved_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Retrieved At"
+          },
+          "sequence": {
+            "title": "Sequence",
+            "type": "integer"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          }
+        },
+        "required": [
+          "filename",
+          "league",
+          "game_type",
+          "source",
+          "dest",
+          "sequence",
+          "received_at",
+          "file_size"
+        ],
+        "title": "PacketInfo",
+        "type": "object"
+      },
+      "PacketListResponse": {
+        "description": "List of packets",
+        "properties": {
+          "packets": {
+            "items": {
+              "$ref": "#/components/schemas/PacketInfo"
+            },
+            "title": "Packets",
+            "type": "array"
+          }
+        },
+        "required": [
+          "packets"
+        ],
+        "title": "PacketListResponse",
+        "type": "object"
+      },
+      "PacketUploadResponse": {
+        "description": "Response from packet upload",
+        "properties": {
+          "filename": {
+            "title": "Filename",
+            "type": "string"
+          },
+          "packet_id": {
+            "title": "Packet Id",
+            "type": "integer"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "filename",
+          "packet_id"
+        ],
+        "title": "PacketUploadResponse",
+        "type": "object"
+      },
+      "TokenResponse": {
+        "description": "OAuth2 token response",
+        "properties": {
+          "access_token": {
+            "title": "Access Token",
+            "type": "string"
+          },
+          "token_type": {
+            "default": "bearer",
+            "title": "Token Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "access_token"
+        ],
+        "title": "TokenResponse",
+        "type": "object"
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "title": "Location",
+            "type": "array"
+          },
+          "msg": {
+            "title": "Message",
+            "type": "string"
+          },
+          "type": {
+            "title": "Error Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError",
+        "type": "object"
+      }
+    },
+    "securitySchemes": {
+      "OAuth2PasswordBearer": {
+        "flows": {
+          "password": {
+            "scopes": {},
+            "tokenUrl": "/service/api/v1/auth/token"
+          }
+        },
+        "type": "oauth2"
+      }
+    }
+  },
+  "info": {
+    "description": "\n# Service API for nova_client\n\nThis API is used by BBS clients running nova_client to:\n\n- **Authenticate** using OAuth2 client credentials flow\n- **Upload packets** generated by BRE/FE door games\n- **Download packets** destined for their BBS (poll `/leagues/{league_id}/packets?unread=true`)\n- **Download nodelists** for league member information\n\n## Authentication\n\nAll endpoints except `/auth/token` require OAuth2 Bearer token authentication.\n\n1. Request a token: `POST /service/api/v1/auth/token`, form-encoded, with\n   `grant_type=client_credentials`, `client_id` and `client_secret`.\n   This is the **client credentials** grant - credentials go in the request\n   body, not in a Basic auth header. No scopes are used.\n2. Use the token: `Authorization: Bearer <token>` header.\n\nTokens are JWTs and expire after `jwt_expiry_hours` (24 by default).\n\nNote for anyone reading the generated OpenAPI schema: the security scheme is\ndeclared as `OAuth2PasswordBearer` because that is FastAPI's helper for\nextracting a bearer token from the `Authorization` header. It describes how the\ntoken is *presented*, not how it is *obtained* - the token endpoint accepts\n`client_credentials` and nothing else.\n\n## No WebSocket\n\nThere is no WebSocket endpoint. Clients discover work by polling\n`GET /service/api/v1/leagues/{league_id}/packets?unread=true`. Downloading a\npacket is itself the acknowledgement: the hub marks it read when it serves it,\nso it drops out of subsequent `unread=true` responses.\n\n## Packet Naming Convention\n\nPackets follow the format: `<league><game><source><dest>.<seq>`\n\n- **league**: 3-digit league number (e.g., 555)\n- **game**: B (BRE) or F (FE)\n- **source**: 2-digit hex BBS index (01-FF)\n- **dest**: 2-digit hex BBS index (01-FF)\n- **seq**: 3-digit sequence number (000-999, wraps)\n\nExample: `555B0201.001` = BRE League 555, from BBS 02 to BBS 01, sequence 1\n    ",
+    "license": {
+      "name": "MIT"
+    },
+    "title": "Nova Hub - Service API",
+    "version": "0.5.1"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/api/v1/auth/token": {
+      "post": {
+        "description": "OAuth2 token endpoint for client authentication\n\n**Grant Type:** client_credentials\n\n**Form Parameters:**\n- `grant_type`: Must be \"client_credentials\"\n- `client_id`: Your client ID\n- `client_secret`: Your client secret\n\n**Returns:** Access token valid for 24 hours\n\n**Example:**\n```bash\ncurl -X POST \"https://hub.example.com/service/api/v1/auth/token\" \\\n  -d \"grant_type=client_credentials\" \\\n  -d \"client_id=your_client_id\" \\\n  -d \"client_secret=your_secret\"\n```",
+        "operationId": "login_for_access_token_api_v1_auth_token_post",
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_login_for_access_token_api_v1_auth_token_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Access Token",
+        "tags": [
+          "Service API - Authentication"
+        ]
+      }
+    },
+    "/api/v1/auth/verify": {
+      "get": {
+        "description": "Verify your access token and get client information\n\n**Requires:** Valid Bearer token in Authorization header\n\n**Returns:** Client details if token is valid\n\n**Example:**\n```bash\ncurl -X GET \"https://hub.example.com/service/api/v1/auth/verify\" \\\n  -H \"Authorization: Bearer YOUR_ACCESS_TOKEN\"\n```",
+        "operationId": "verify_token_api_v1_auth_verify_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClientVerifyResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "summary": "Verify Access Token",
+        "tags": [
+          "Service API - Authentication"
+        ]
+      }
+    },
+    "/api/v1/leagues/{league_id}/nodelist": {
+      "get": {
+        "description": "Download the latest nodelist file for a league\n\n**Path Parameters:**\n- `league_id`: League identifier with game type (e.g., \"555B\" for BRE, \"555F\" for FE)\n\n**Returns:** Binary nodelist file (BRNODES.xxx or FENODES.xxx)\n\n**Description:**\nThe nodelist contains information about all BBS nodes in the league.\nThese files are generated by the hub and should be placed in your game directory.\n\n**THIS IS NOT THE NORMAL WAY TO GET A NODELIST.** When the hub regenerates a\nnodelist it queues it as an ordinary packet addressed to every member BBS, so\nit arrives through the same unread-packet flow as game traffic - list packets,\ndownload by filename, done. That is deliberate: a nodelist changes once or\ntwice a year, and having every client poll this endpoint every couple of\nminutes to discover that is the wrong shape.\n\nUse this endpoint for **bootstrap and repair only**: a newly registered node\nthat has no nodelist yet and would otherwise sit blind until the next\nregeneration, or one whose game directory was rebuilt. If you are calling it\non a timer, you have almost certainly wired your client up wrong.\n\n**Authentication:** Requires Bearer token and league membership\n\n**Caching:** The response carries `ETag` and `Last-Modified`. Send the ETag\nback as `If-None-Match` (or the date as `If-Modified-Since`) and you get a\n`304 Not Modified` with no body when the nodelist has not changed. Nodelists\nchange rarely but clients poll often, so this is worth doing.\n\n**Example:**\n```bash\ncurl -X GET \"https://hub.example.com/service/api/v1/leagues/555B/nodelist\" \\\n  -H \"Authorization: Bearer YOUR_TOKEN\" \\\n  -H 'If-None-Match: \"8f14e45fceea167a5a36dedd4bea2543\"' \\\n  -o BRNODES.555\n```",
+        "operationId": "download_nodelist_api_v1_leagues__league_id__nodelist_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "league_id",
+            "required": true,
+            "schema": {
+              "pattern": "^(\\d{3})([BF])$",
+              "title": "League Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "summary": "Download Nodelist",
+        "tags": [
+          "Service API - Leagues"
+        ]
+      }
+    },
+    "/api/v1/leagues/{league_id}/packets": {
+      "get": {
+        "description": "List packets available for download by this client\n\n**Path Parameters:**\n- `league_id`: League identifier with game type (e.g., \"555B\" for BRE, \"555F\" for FE)\n\n**Query Parameters:**\n- `unread`: Set to `true` to only show packets not yet downloaded (default: false)\n\n**Returns:** List of packets destined for this client's BBS\n\n**Authentication:** Requires Bearer token",
+        "operationId": "list_packets_api_v1_leagues__league_id__packets_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "league_id",
+            "required": true,
+            "schema": {
+              "pattern": "^(\\d{3})([BF])$",
+              "title": "League Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Filter to only unread (not downloaded) packets",
+            "in": "query",
+            "name": "unread",
+            "required": false,
+            "schema": {
+              "default": false,
+              "description": "Filter to only unread (not downloaded) packets",
+              "title": "Unread",
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PacketListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "summary": "List Available Packets",
+        "tags": [
+          "Service API - Packets"
+        ]
+      }
+    },
+    "/api/v1/leagues/{league_id}/packets/{filename}": {
+      "get": {
+        "description": "Download a specific packet file\n\n**Path Parameters:**\n- `league_id`: League identifier with game type (e.g., \"555B\" for BRE, \"555F\" for FE)\n- `filename`: Packet filename (e.g., \"555B0102.001\")\n\n**Returns:** Binary packet file\n\n**Authentication:** Requires Bearer token and authorization for destination BBS",
+        "operationId": "download_packet_api_v1_leagues__league_id__packets__filename__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "league_id",
+            "required": true,
+            "schema": {
+              "pattern": "^(\\d{3})([BF])$",
+              "title": "League Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "filename",
+            "required": true,
+            "schema": {
+              "title": "Filename",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "summary": "Download Packet",
+        "tags": [
+          "Service API - Packets"
+        ]
+      },
+      "put": {
+        "description": "Upload a game packet to the hub using PUT with raw body\n\n**Path Parameters:**\n- `league_id`: League identifier with game type (e.g., \"555B\" for BRE, \"555F\" for FE)\n- `filename`: Packet filename (e.g., \"555B0201.001\")\n\n**Request Body:** Raw file data (application/octet-stream)\n\n**Packet Filename Format:** `<league><game><source><dest>.<seq>`\n- League: 3 digits (e.g., 555)\n- Game: B (BRE) or F (FE)\n- Source: 2-digit hex BBS index (e.g., 02)\n- Dest: 2-digit hex BBS index (e.g., 01)\n- Seq: 3-digit sequence (000-999)\n\n**Example:** `555B0201.001` = BRE League 555, from BBS 02 to BBS 01, seq 1\n\n**Authentication:** Requires Bearer token",
+        "operationId": "upload_packet_api_v1_leagues__league_id__packets__filename__put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "league_id",
+            "required": true,
+            "schema": {
+              "pattern": "^(\\d{3})([BF])$",
+              "title": "League Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "filename",
+            "required": true,
+            "schema": {
+              "title": "Filename",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PacketUploadResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "summary": "Upload Packet",
+        "tags": [
+          "Service API - Packets"
+        ]
+      }
+    },
+    "/api/v1/me": {
+      "get": {
+        "description": "The authenticated BBS and the leagues it belongs to\n\nLists the active leagues this BBS is an active member of, with the BBS\nindex the hub has for it in each. The client's connection test compares\nthese with its config.\n\n**Authentication:** Requires Bearer token",
+        "operationId": "who_am_i_api_v1_me_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Account"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "summary": "Who Am I",
+        "tags": [
+          "Service API - Account"
+        ]
+      }
+    }
+  },
+  "servers": [
+    {
+      "url": "/service"
+    }
+  ]
+}
