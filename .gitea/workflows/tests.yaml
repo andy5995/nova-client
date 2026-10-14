@@ -17,10 +17,24 @@ jobs:
           python-version: '3.12'
 
       - name: Install dependencies
+        # Exactly what uv.lock says, dev group included. --locked fails if
+        # pyproject.toml changed without re-locking. uv is pinned so a new
+        # release cannot change how the lock is read.
+        working-directory: .
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install -r requirements-dev.txt
+          python -m pip install uv==0.9.22
+          uv sync --locked --python 3.12
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+
+      - name: python/requirements.txt is the lock's export
+        # pip users install from it, so it must be exactly what was tested.
+        working-directory: .
+        run: |
+          uv export --frozen --no-dev --no-emit-project --no-hashes -o python/requirements.txt
+          git diff --exit-code python/requirements.txt || {
+            echo "python/requirements.txt is stale: run the uv export above and commit it." >&2
+            exit 1
+          }
 
       - name: Run tests
         run: pytest
@@ -37,9 +51,10 @@ jobs:
           python-version: '3.12'
 
       - name: Install mock server dependencies
+        # Into .venv at the repo root, where the Pester tests look first.
         run: |
-          python -m pip install --upgrade pip
-          pip install -r python/requirements.txt -r python/requirements-dev.txt
+          python -m pip install uv==0.9.22
+          uv sync --locked --python 3.12
 
       # The runner image has no PowerShell, so every `shell: pwsh` step failed
       # before running anything: this job was red on every push from the day it

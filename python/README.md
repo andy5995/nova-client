@@ -24,16 +24,13 @@ Async Python client for syncing packets with Nova Hub. Supports one-shot syncs a
 ## Installation
 
 ```bash
-# Clone or copy nova-client directory
-cd nova-client/python
+# From the repo root: .venv there, with exactly the versions in uv.lock
+cd nova-client
+uv sync --no-dev
 
-# Create virtual environment
+# Or with pip (python/requirements.txt is exported from uv.lock)
 python -m venv .venv
-source .venv/bin/activate  # Linux/Mac
-# .venv\Scripts\activate   # Windows
-
-# Install dependencies
-pip install -r requirements.txt
+.venv/bin/pip install -r python/requirements.txt   # .venv\Scripts\pip on Windows
 ```
 
 ## Configuration
@@ -125,7 +122,7 @@ python client.py --config myconfig.toml --verbose
 Schedule via cron:
 ```bash
 # Sync every 5 minutes
-*/5 * * * * cd /path/to/nova-client/python && .venv/bin/python client.py
+*/5 * * * * cd /path/to/nova-client/python && ../.venv/bin/python client.py
 ```
 
 ### Daemon Mode
@@ -218,8 +215,8 @@ After each sync, `metrics.json` contains:
 ## Testing
 
 ```bash
-# Install test dependencies
-pip install -r requirements-dev.txt
+# Install test dependencies (the dev group), from the repo root
+uv sync
 
 # Run the suite. The integration tests start their own mock hub
 # (tests/mock_server.py) on a free port, so nothing else needs to be running.

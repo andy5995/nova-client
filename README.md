@@ -51,15 +51,18 @@ See [`powershell/README.md`](powershell/README.md). If you have PowerShell 7, us
 ### Python
 
 ```bash
+uv sync --no-dev                          # .venv at the repo root, exactly the versions in uv.lock
 cd python
-python -m venv .venv && .venv/bin/pip install -r requirements.txt
 cp config.toml.example config.toml        # then edit it
 
-.venv/bin/python client.py --validate
-.venv/bin/python client.py --test-connection   # sign in, and check leagues and indexes with the hub
-.venv/bin/python client.py --verbose      # one sync
-.venv/bin/python daemon.py --verbose      # run continuously
+../.venv/bin/python client.py --validate
+../.venv/bin/python client.py --test-connection   # sign in, and check leagues and indexes with the hub
+../.venv/bin/python client.py --verbose      # one sync
+../.venv/bin/python daemon.py --verbose      # run continuously
 ```
+
+No uv? `python -m venv .venv && .venv/bin/pip install -r python/requirements.txt` at
+the repo root does the same: that file is exported from `uv.lock`.
 
 See [`python/README.md`](python/README.md), and [`linux/`](linux/) for the systemd unit.
 

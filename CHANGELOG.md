@@ -7,6 +7,15 @@ Python-only release, which is the code that had been running in production.
 
 ## [Unreleased]
 
+### Changed
+
+- **Python dependencies are locked with uv.** `pyproject.toml` at the repo root lists
+  them, `uv.lock` holds the exact versions, and `uv sync --no-dev` builds `.venv` at the
+  repo root, where `linux/nova-client.service` already expected it. `python/requirements.txt`
+  is now exported from the lock with every indirect dependency pinned, so a pip install
+  gets exactly what CI tested. `python/requirements-dev.txt` is gone: the test
+  dependencies are the lock's dev group (`uv sync`). No version changed.
+
 ### Added
 
 - **Connection test**: `client.py --test-connection` and `-TestConnection`. Signs in to the
