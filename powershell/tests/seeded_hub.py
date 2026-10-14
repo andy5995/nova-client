@@ -9,7 +9,7 @@ cannot create the situation we need to test: the hub refuses to let a client
 upload a packet claiming a *different* BBS as the source, which is exactly the
 packet we need waiting for us in order to test downloading.
 
-Run:  python powershell/tests/seeded_hub.py
+Run:  python powershell/tests/seeded_hub.py [port]   (default 8000)
 Then: test_client / test_secret, league 555B, BBS index 2
 """
 
@@ -104,4 +104,5 @@ seed()
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app, host="127.0.0.1", port=8000, log_level="warning")
+    port = int(sys.argv[1]) if len(sys.argv) > 1 else 8000
+    uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")

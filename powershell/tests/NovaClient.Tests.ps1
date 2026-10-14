@@ -50,7 +50,13 @@ BeforeAll {
     # an inbound packet and a nodelist already waiting for us.
     $Script:MockServer = Join-Path $Script:PsDir 'tests/seeded_hub.py'
     $Script:ExpectedPacket = Join-Path $Script:PsDir 'tests/expected_packet.bin'
-    $Script:HubUrl     = 'http://127.0.0.1:8000'
+    # A free port, not 8000: a dev box often has a real hub there, which then
+    # answers /health and fails every test with a 405 on /__test__/reset.
+    $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
+    $listener.Start()
+    $Script:HubPort = $listener.LocalEndpoint.Port
+    $listener.Stop()
+    $Script:HubUrl     = "http://127.0.0.1:$Script:HubPort"
 
     function Start-MockHub {
         [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '')]
@@ -69,7 +75,7 @@ BeforeAll {
             $python = if (Get-Command python3 -ErrorAction SilentlyContinue) { 'python3' } else { 'python' }
         }
 
-        $proc = Start-Process -FilePath $python -ArgumentList $Script:MockServer `
+        $proc = Start-Process -FilePath $python -ArgumentList @($Script:MockServer, $Script:HubPort) `
             -PassThru -RedirectStandardOutput (Join-Path ([IO.Path]::GetTempPath()) 'mockhub.out') `
             -RedirectStandardError (Join-Path ([IO.Path]::GetTempPath()) 'mockhub.err')
 
