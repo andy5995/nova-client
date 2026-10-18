@@ -307,8 +307,13 @@ function Get-NovaLeagues {
 #  already validated it - the redundancy is the point.
 # ============================================================================
 
-$Script:PacketPattern   = '^[0-9]{3}[BF][0-9A-Fa-f]{4}\.[0-9]{3}$'
-$Script:NodelistPattern = '^(BR|FE)NODES\.[0-9]{3}$'
+# \z, not $: in .NET, $ also matches before a trailing newline.
+$Script:PacketPattern   = '^[0-9]{3}[BF][0-9A-Fa-f]{4}\.[0-9]{3}\z'
+$Script:NodelistPattern = '^(BR|FE)NODES\.[0-9]{3}\z'
+
+# cmd.exe gives these a meaning of its own: chaining, redirection, variables.
+# None belongs in a game command or its arguments, which run as "cmd /c ...".
+$Script:UnsafeCommandPattern = '[&|<>^%"\r\n]'
 
 function Get-SafeNovaFilename {
     <#
@@ -347,7 +352,7 @@ function Test-NovaPacketFile {
     param([string] $Filename, $League)
 
     $gameLetter = $League.Game.Substring(0, 1)
-    $pattern = '^{0}{1}([0-9A-F]{{2}})[0-9A-F]{{2}}\.\d{{3}}$' -f
+    $pattern = '^{0}{1}([0-9A-F]{{2}})[0-9A-F]{{2}}\.\d{{3}}\z' -f
         [regex]::Escape($League.Number), [regex]::Escape($gameLetter)
 
     $match = [regex]::Match($Filename, $pattern, 'IgnoreCase')
@@ -726,8 +731,12 @@ function Test-NovaBytesEqual {
 function Receive-NovaNodelist {
     <#
         The hub derives the nodelist filename itself from the league, so we ask
-        for it by league and write whatever it gives us into the game folder.
-        Treat the body as an opaque blob - parsing it is the door game's job.
+        for it by league and write whatever it gives us into the inbound
+        directory, where a nodelist the hub sends as a packet lands too, and
+        where the game takes it in at its next maintenance. (It used to go in
+        the game folder, which the game does not read for packets, and then
+        counted as "have one" from then on.) Treat the body as an opaque blob -
+        parsing it is the door game's job.
 
         THIS IS NOT THE NORMAL WAY A NODELIST ARRIVES. The hub stores a changed
         nodelist as an ordinary Packet addressed to each member BBS, so it comes
@@ -737,8 +746,9 @@ function Receive-NovaNodelist {
         it every couple of minutes to find that out is the wrong shape.
 
         So by default this only fires when we have no local nodelist at all -
-        a brand new node, or one whose game folder was rebuilt, either of which
-        would otherwise wait for the next hub-side regeneration. Set
+        no brnodes.dat / fenodes.dat in the game folder and none waiting in
+        inbound: a brand new node, or one whose game folder was rebuilt, either
+        of which would otherwise wait for the next hub-side regeneration. Set
         Sync.NodelistCheck = 'always' to poll anyway, or 'never' to disable it.
 
         In 'always' mode it is a conditional request: we send back the ETag the
@@ -776,9 +786,22 @@ function Receive-NovaNodelist {
     $url = '{0}/service/api/v1/leagues/{1}/nodelist' -f
         (Get-NovaSetting $Cfg 'Hub.Url').TrimEnd('/'), $League.LeagueId
 
-    $finalPath = Join-Path $League.GameFolder $safeName
+    if (-not (Test-Path -LiteralPath $League.InboundDir)) {
+        $null = New-Item -ItemType Directory -Path $League.InboundDir -Force
+    }
+    $finalPath = Join-Path $League.InboundDir $safeName
     $partPath = "$finalPath.part"
-    $haveFile = Test-Path -LiteralPath $finalPath
+
+    # Found case-insensitively: DOS-era files, casing on disk anyone's guess.
+    # The game's own nodes file is the nodelist once taken in; one waiting in
+    # inbound is a nodelist not taken in yet.
+    $gameNodes = if ($League.Game -eq 'BRE') { 'brnodes.dat' } else { 'fenodes.dat' }
+    $installed = Get-ChildItem -LiteralPath $League.GameFolder -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -ieq $gameNodes } | Select-Object -First 1
+    $pending = Get-ChildItem -LiteralPath $League.InboundDir -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -ieq $safeName } | Select-Object -First 1
+    if ($pending) { $finalPath = $pending.FullName; $partPath = "$finalPath.part" }
+    $haveFile = [bool]($installed -or $pending)
 
     $mode = Get-NovaSetting $Cfg 'Sync.NodelistCheck' 'bootstrap'
     switch ($mode) {
@@ -788,7 +811,7 @@ function Receive-NovaNodelist {
         }
         'bootstrap' {
             if ($haveFile) {
-                Write-NovaLog DEBUG "Have $safeName already; the hub sends changes as packets"
+                Write-NovaLog DEBUG "Have a nodelist for $($League.LeagueId) already; the hub sends changes as packets"
                 return $false
             }
             Write-NovaLog INFO "No local $safeName yet; fetching one to start from" $League.Key
@@ -834,7 +857,13 @@ function Receive-NovaNodelist {
 
     $newEtag = $result.Headers['etag']
 
-    if ($haveFile -and (Test-NovaBytesEqual $bytes ([IO.File]::ReadAllBytes($finalPath)))) {
+    $unchanged = $false
+    foreach ($local in @($pending, $installed)) {
+        if ($local -and (Test-NovaBytesEqual $bytes ([IO.File]::ReadAllBytes($local.FullName)))) {
+            $unchanged = $true
+        }
+    }
+    if ($unchanged) {
         Write-NovaLog DEBUG "Nodelist $safeName unchanged" $League.Key
         if ($newEtag) { Save-NovaNodelistEtag -Cfg $Cfg -Key $League.LeagueId -Etag $newEtag }
         return $false
@@ -921,8 +950,11 @@ function Invoke-NovaSync {
     <#
         One full sync pass over every enabled league.
         Returns an object with Uploaded / Downloaded / Errors.
+
+        -UploadOnly sends outbound packets and downloads nothing: the pass
+        after maintenance has written replies, which must not trigger another.
     #>
-    param([hashtable] $Cfg)
+    param([hashtable] $Cfg, [switch] $UploadOnly)
 
     $Script:Metrics = [ordered]@{
         start_time       = (Get-Date).ToString('o')
@@ -964,6 +996,8 @@ function Invoke-NovaSync {
         $up = Invoke-NovaLeagueUpload -Cfg $Cfg -League $league
         $Script:Metrics.leagues[$league.Key].uploaded = $up
         $Script:Metrics.total_uploaded += $up
+
+        if ($UploadOnly) { continue }
 
         $down = Invoke-NovaLeagueDownload -Cfg $Cfg -League $league
         $Script:Metrics.leagues[$league.Key].downloaded = $down
@@ -1035,6 +1069,10 @@ function Invoke-NovaGameMaintenance {
     }
 
     $command = '{0} {1}' -f $League.GameCommand, $League.MaintenanceArgs
+    if ($command -match $Script:UnsafeCommandPattern) {
+        Write-NovaLog ERROR "Not running '$command': it holds a character cmd.exe would act on" $League.Key
+        return $false
+    }
     Write-NovaLog INFO "Running maintenance: $command (in $($League.GameFolder))" $League.Key
 
     $process = $null
@@ -1070,15 +1108,21 @@ function Invoke-NovaGameMaintenance {
 }
 
 function Invoke-NovaAllMaintenance {
+    <#
+        Returns Ran and Failed counts. Failures used to go uncounted, so a
+        daemon whose game never ran still reported no errors.
+    #>
     param([hashtable] $Cfg)
 
     $timeout = [int](Get-NovaSetting $Cfg 'Daemon.MaintenanceTimeoutSeconds' 300)
     $ran = 0
+    $failed = 0
     foreach ($league in (Get-NovaLeagues -Cfg $Cfg)) {
         if (-not $league.GameFolder) { continue }
         if (Invoke-NovaGameMaintenance -League $league -TimeoutSeconds $timeout) { $ran++ }
+        else { $failed++ }
     }
-    return $ran
+    return [pscustomobject]@{ Ran = $ran; Failed = $failed }
 }
 
 # ============================================================================
@@ -1119,6 +1163,13 @@ function Test-NovaConfig {
         }
         if ($league.Number -notmatch '^\d{3}$') {
             $null = $problems.Add("${label}: Number must be exactly 3 digits (e.g. '015')")
+        }
+        foreach ($setting in @(
+                @{ Name = 'GameCommand'; Value = $league.GameCommand },
+                @{ Name = 'MaintenanceArgs'; Value = $league.MaintenanceArgs })) {
+            if ([string]$setting.Value -match $Script:UnsafeCommandPattern) {
+                $null = $problems.Add("${label}: $($setting.Name) holds a character cmd.exe would act on (& | < > ^ % `" or a line break): $($setting.Value)")
+            }
         }
         if ($league.BbsIndex -isnot [int]) {
             $null = $problems.Add("${label}: BbsIndex is required and must be a number")
@@ -1205,32 +1256,51 @@ function Test-NovaNodesFile {
     }
 
     # Six lines per entry - index, name, FidoNet address, city, state, country -
-    # separated by a blank line.
-    $lines = Get-Content -LiteralPath $nodesFile.FullName -ErrorAction SilentlyContinue
+    # then blank lines up to the next. Read as fixed records, as nova-hub's and
+    # the Python client's nodes_parser.py do: city, state and country may each
+    # be blank, so a blank line does not by itself end an entry.
+    $lines = @(Get-Content -LiteralPath $nodesFile.FullName -ErrorAction SilentlyContinue)
     $entries = @{}
-    $buffer = @()
-    foreach ($line in @($lines) + @('')) {
-        if ([string]::IsNullOrWhiteSpace($line)) {
-            if ($buffer.Count -ge 2) {
-                # The index line may carry routing info: "1 HOST 2 3 4", which
-                # is how the hub's own entry is written. Parsing the whole line
-                # as an integer fails and silently drops that node - so take the
-                # first token. nova-hub's nodes_parser.py does the same.
-                $index = 0
-                $indexToken = ($buffer[0].Trim() -split '\s+')[0]
-                if ([int]::TryParse($indexToken, [ref]$index)) {
-                    if ($entries.ContainsKey($index)) {
-                        $null = $Problems.Add("${label}: duplicate BBS index $index in $($nodesFile.Name)")
-                    }
-                    else {
-                        $entries[$index] = $buffer[1].Trim()
-                    }
-                }
-            }
-            $buffer = @()
+    $hosts = @{}
+    $routed = @{}
+    $i = 0
+    while ($i -lt $lines.Count) {
+        if ([string]::IsNullOrWhiteSpace($lines[$i])) { $i++; continue }
+        $lineNumber = $i + 1
+        $indexLine = $lines[$i].Trim()
+        $name = if ($i + 1 -lt $lines.Count) { $lines[$i + 1].Trim() } else { '' }
+        $i += 6
+
+        # The index line may carry routing info: "1 HOST 2 3 4", which is how
+        # the hub's own entry is written. Take the first token as the index.
+        $tokens = @($indexLine -split '\s+')
+        $index = 0
+        if (-not [int]::TryParse($tokens[0], [ref]$index)) {
+            # A warning, not a problem: a problem stops the sync that would
+            # fetch a corrected nodelist.
+            $null = $Warnings.Add("${label}: line ${lineNumber} of $($nodesFile.Name) should start with a BBS index: '$indexLine'")
             continue
         }
-        $buffer += $line
+        if ($entries.ContainsKey($index)) {
+            $null = $Problems.Add("${label}: duplicate BBS index $index in $($nodesFile.Name)")
+            continue
+        }
+        $entries[$index] = $name
+        if ($tokens.Count -ge 3 -and $tokens[1] -ieq 'HOST') {
+            $hosts[$index] = $true
+            foreach ($token in $tokens[2..($tokens.Count - 1)]) {
+                $target = 0
+                if ([int]::TryParse($token, [ref]$target)) { $routed[$target] = $true }
+            }
+        }
+    }
+
+    # "1 HOST 2 3" sends traffic for 2 and 3 through 1, the hub. A node outside
+    # every HOST line is sent to directly, past the hub (nova-client #19).
+    $direct = @($entries.Keys | Where-Object { -not $hosts.ContainsKey($_) -and -not $routed.ContainsKey($_) } |
+        Sort-Object)
+    if ($direct.Count -gt 0) {
+        $null = $Warnings.Add("${label}: no HOST line in $($nodesFile.Name) routes for $($direct -join ', '), so the game sends to them directly rather than through the hub")
     }
 
     if (-not $entries.ContainsKey([int]$League.BbsIndex)) {
@@ -1470,17 +1540,27 @@ function Start-NovaDaemon {
 
                 if ($result.Downloaded -gt 0 -and $maintOnDownload) {
                     Write-NovaLog INFO "$($result.Downloaded) packet(s) arrived; running maintenance now"
-                    $stats.maintenance_count += Invoke-NovaAllMaintenance -Cfg $Cfg
+                    $maint = Invoke-NovaAllMaintenance -Cfg $Cfg
+                    $stats.maintenance_count += $maint.Ran
+                    $stats.errors += $maint.Failed
                     # Reset the scheduled clock too, so we don't immediately run
                     # a second time for the same batch of packets.
                     $lastMaintenance = Get-Date
+
+                    # Send the replies maintenance just wrote now, rather than
+                    # a sync interval from now.
+                    $replies = Invoke-NovaSync -Cfg $Cfg -UploadOnly
+                    $stats.packets_uploaded += $replies.Uploaded
+                    $stats.errors += $replies.Errors
                 }
             }
             # Never run maintenance before the first sync has happened - on a
             # cold start there is nothing to process yet.
             elseif ($lastSync -ne [datetime]::MinValue -and
                     ($now - $lastMaintenance).TotalSeconds -ge $maintInterval) {
-                $stats.maintenance_count += Invoke-NovaAllMaintenance -Cfg $Cfg
+                $maint = Invoke-NovaAllMaintenance -Cfg $Cfg
+                $stats.maintenance_count += $maint.Ran
+                $stats.errors += $maint.Failed
                 $lastMaintenance = Get-Date
             }
 
@@ -1572,17 +1652,27 @@ function Invoke-NovaMain {
     Write-NovaLog INFO "BBS: $(Get-NovaSetting $cfg 'Bbs.Name' '(unnamed)')"
     Write-NovaLog INFO "Hub: $(Get-NovaSetting $cfg 'Hub.Url')"
 
-    # One instance per config file. The Python client has no such guard, and two
-    # daemons against one config will both claim the same packets and both try
-    # to run the game in the same folder.
+    # One instance per config file. Two daemons against one config will both
+    # claim the same packets and both try to run the game in the same folder.
+    #
+    # SHA256, not MD5: .NET Framework refuses MD5 outright on a Windows host with
+    # FIPS mode on, and this ran before anything else.
     $configKey = (Resolve-Path -LiteralPath $Config).Path.ToLowerInvariant()
     $hash = [BitConverter]::ToString(
-        [Security.Cryptography.MD5]::Create().ComputeHash(
-            [Text.Encoding]::UTF8.GetBytes($configKey))).Replace('-', '')
+        [Security.Cryptography.SHA256]::Create().ComputeHash(
+            [Text.Encoding]::UTF8.GetBytes($configKey))).Replace('-', '').Substring(0, 32)
     $mutex = $null
     $acquired = $false
     try {
-        try   { $mutex = New-Object System.Threading.Mutex($false, "Global\NovaClient-$hash") }
+        try { $mutex = New-Object System.Threading.Mutex($false, "Global\NovaClient-$hash") }
+        catch [UnauthorizedAccessException] {
+            # The mutex exists, so a client holds it, and its default security
+            # shuts this account out: the scheduled task, running as SYSTEM,
+            # while a sysop runs -Once. Falling back to Local\ here, as this
+            # used to, let the two run side by side.
+            Write-NovaLog ERROR "Another Nova Client is already running with this config, under another account (the scheduled task?): $Config"
+            return 3
+        }
         catch { $mutex = New-Object System.Threading.Mutex($false, "Local\NovaClient-$hash") }
 
         try { $acquired = $mutex.WaitOne(0) }

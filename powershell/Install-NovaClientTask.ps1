@@ -85,8 +85,55 @@ $action = New-ScheduledTaskAction -Execute $shell -Argument $arguments `
 
 $trigger = New-ScheduledTaskTrigger -AtStartup
 
+function Get-NovaLooseWriter {
+    <#
+        Which of the everyday groups may change this file or folder. Checked by
+        SID, because the group names are translated on non-English Windows.
+    #>
+    param([string] $Path)
+
+    $broad = @{
+        'S-1-1-0'      = 'Everyone'
+        'S-1-5-11'     = 'Authenticated Users'
+        'S-1-5-32-545' = 'Users'
+        'S-1-5-4'      = 'INTERACTIVE'
+    }
+    # On a folder, WriteData and AppendData are "create files" and "create
+    # folders": enough to drop a BRE.BAT, which cmd.exe finds before BRE.EXE.
+    $writes = [Security.AccessControl.FileSystemRights]'WriteData, AppendData, ChangePermissions, TakeOwnership'
+    $rules = (Get-Acl -LiteralPath $Path).GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])
+    return @($rules | Where-Object {
+            $_.AccessControlType -eq 'Allow' -and
+            ($_.FileSystemRights -band $writes) -and
+            $broad.ContainsKey($_.IdentityReference.Value)
+        } | ForEach-Object { $broad[$_.IdentityReference.Value] } | Sort-Object -Unique)
+}
+
 if ($User -eq 'SYSTEM') {
     $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+
+    # As SYSTEM, the task runs whatever these say: the launcher, the shared
+    # code it dot-sources, the config (GameCommand), and each game folder,
+    # where the game command is run. Anyone who can change one can run code
+    # as SYSTEM. A warning, not a refusal: the sysop may know the box.
+    $toCheck = @($scriptPath, (Join-Path (Split-Path $scriptPath -Parent) 'NovaClient.Common.ps1'), $configPath)
+    try {
+        $cfgData = Import-PowerShellDataFile -LiteralPath $configPath
+        foreach ($league in @($cfgData.Leagues)) {
+            if ($league -is [hashtable] -and $league.GameFolder) { $toCheck += $league.GameFolder }
+        }
+    }
+    catch {
+        Write-Host "Could not read $configPath to check its game folders: $($_.Exception.Message)" -ForegroundColor Yellow
+    }
+    foreach ($path in $toCheck) {
+        if (-not (Test-Path -LiteralPath $path)) { continue }
+        $writers = Get-NovaLooseWriter -Path $path
+        if ($writers.Count -gt 0) {
+            Write-Host "WARNING: $($writers -join ', ') can change $path, and the task runs it as SYSTEM." -ForegroundColor Yellow
+            Write-Host '         Remove their write access, or run the task as an ordinary account with -User.' -ForegroundColor Yellow
+        }
+    }
 }
 else {
     # Password:$null with LogonType Password means the task runs whether or not

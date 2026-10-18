@@ -7,6 +7,37 @@ Python-only release, which is the code that had been running in production.
 
 ## [Unreleased]
 
+### Fixed (PowerShell client)
+
+- **The bootstrap nodelist went where the game never looked.** A node with no nodelist fetched
+  `BRNODES.<league>` into the game folder, then counted that file as having one, so the game
+  never took it in and it was never fetched again. It now goes in the inbound folder, where a
+  nodelist the hub sends as a packet lands. A node counts as having a nodelist when the game's
+  `brnodes.dat` / `fenodes.dat` exists, or one is waiting in inbound.
+- **On a FIPS-mode Windows host, the client could not start.** The single-instance check
+  hashed the config path with MD5, which .NET Framework refuses there. It uses SHA256.
+- **`-Once` could run alongside the scheduled task.** The task, as SYSTEM, creates its mutex
+  with security an ordinary account cannot open, and the client then fell back to a mutex of
+  its own. It now says another instance is running under another account, and exits 3.
+- **Windows PowerShell 5.1 turned TLS 1.3 off and TLS 1.1 on.** Where .NET leaves the choice
+  to Windows, so does the client; otherwise TLS 1.2 is added and SSL 3, TLS 1.0 and 1.1 are
+  removed.
+- `-Validate` read the nodes file by blank lines, so a blank city split an entry in two; it now
+  reads fixed six-line records, as the hub and the Python client do.
+- A maintenance run that failed was not counted in the daemon's errors.
+- A packet name with a trailing newline passed the name check.
+
+### Added (PowerShell client)
+
+- `-Validate` warns about a nodes-file index line that is not a number, and about nodes no
+  `HOST` line routes through the hub (#19).
+- `GameCommand` and `MaintenanceArgs` holding `& | < > ^ % "` or a line break are refused, by
+  `-Validate` and by maintenance.
+- After the maintenance that new packets trigger, the daemon uploads the replies at once.
+- `Install-NovaClientTask.ps1` warns when the task runs as SYSTEM and Everyone, Users,
+  Authenticated Users or INTERACTIVE can change the launcher, the shared script, the config or
+  a game folder: any of them could run code as SYSTEM.
+
 ### Changed
 
 - **Python dependencies are locked with uv.** `pyproject.toml` at the repo root lists

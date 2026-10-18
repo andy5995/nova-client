@@ -75,9 +75,12 @@ BeforeAll {
             $python = if (Get-Command python3 -ErrorAction SilentlyContinue) { 'python3' } else { 'python' }
         }
 
+        # A directory of this run's own, so two runs never share a log
+        $Script:MockLogDir = Join-Path ([IO.Path]::GetTempPath()) ("nova-mockhub-" + [guid]::NewGuid().ToString('N'))
+        $null = New-Item -ItemType Directory -Path $Script:MockLogDir -Force
         $proc = Start-Process -FilePath $python -ArgumentList @($Script:MockServer, $Script:HubPort) `
-            -PassThru -RedirectStandardOutput (Join-Path ([IO.Path]::GetTempPath()) 'mockhub.out') `
-            -RedirectStandardError (Join-Path ([IO.Path]::GetTempPath()) 'mockhub.err')
+            -PassThru -RedirectStandardOutput (Join-Path $Script:MockLogDir 'mockhub.out') `
+            -RedirectStandardError (Join-Path $Script:MockLogDir 'mockhub.err')
 
         # Wait for it to answer, rather than sleeping a fixed amount and hoping.
         $deadline = (Get-Date).AddSeconds(30)
@@ -88,7 +91,7 @@ BeforeAll {
             }
             catch { Start-Sleep -Milliseconds 250 }
         }
-        $hint = Get-Content (Join-Path ([IO.Path]::GetTempPath()) 'mockhub.err') -Raw -ErrorAction SilentlyContinue
+        $hint = Get-Content (Join-Path $Script:MockLogDir 'mockhub.err') -Raw -ErrorAction SilentlyContinue
         throw "Mock hub did not become ready within 30s (using '$python').`n$hint"
     }
 
@@ -195,6 +198,9 @@ BeforeAll {
 AfterAll {
     if ($Script:MockProc -and -not $Script:MockProc.HasExited) {
         Stop-Process -Id $Script:MockProc.Id -Force -ErrorAction SilentlyContinue
+    }
+    if ($Script:MockLogDir) {
+        Remove-Item -LiteralPath $Script:MockLogDir -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
 
@@ -360,6 +366,51 @@ Describe 'Nova Client <_.Name>' -ForEach $Targets {
             $r.Output | Should -Match 'duplicate BBS index 2'
         }
 
+        It 'rejects a game command cmd.exe would act on' {
+            (Get-Content $Script:Ws.Config -Raw).Replace(
+                "GameFolder  =", "MaintenanceArgs = 'PLANETARY & del *.*'`n            GameFolder  =") |
+                Set-Content $Script:Ws.Config
+            $r = Invoke-Client -Target $_ -ConfigPath $Script:Ws.Config -ClientArgs @('-Validate')
+            $r.ExitCode | Should -Be 2
+            $r.Output | Should -Match 'MaintenanceArgs holds a character cmd.exe would act on'
+        }
+
+        It 'reads an entry whose city is blank as one entry' {
+            # Six fixed lines, as the hub and the Python client read them: a
+            # blank city does not end the entry, and the index that follows
+            # is still the next entry's.
+            @(
+                '1 HOST 2 3', 'Nova Hub', '135:1/1', '', '', '', ''
+                '2', 'Test BBS', '1:2/3', '', '3', 'AUS', ''
+                '3', 'Other BBS', '1:2/4', 'X', 'Y', 'Z', ''
+            ) | Set-Content -LiteralPath (Join-Path $Script:Ws.Game 'BRNODES.DAT')
+            $r = Invoke-Client -Target $_ -ConfigPath $Script:Ws.Config -ClientArgs @('-Validate')
+            $r.ExitCode | Should -Be 0 -Because $r.Output
+            $r.Output | Should -Not -Match 'duplicate BBS index'
+            $r.Output | Should -Not -Match 'routes for'
+        }
+
+        It 'warns about a node no HOST line routes through the hub' {
+            @(
+                '1', 'Nova Hub', '135:1/1', 'Brisbane', 'QLD', 'AUS', ''
+                '2', 'Test BBS', '1:2/3', 'X', 'Y', 'Z', ''
+            ) | Set-Content -LiteralPath (Join-Path $Script:Ws.Game 'BRNODES.DAT')
+            $r = Invoke-Client -Target $_ -ConfigPath $Script:Ws.Config -ClientArgs @('-Validate')
+            $r.ExitCode | Should -Be 0
+            $r.Output | Should -Match 'no HOST line in BRNODES.DAT routes for 1, 2'
+        }
+
+        It 'warns, rather than refuses, on an index line that is not a number' {
+            @(
+                '1 HOST 2', 'Nova Hub', '135:1/1', 'Brisbane', 'QLD', 'AUS', ''
+                '2', 'Test BBS', '1:2/3', 'X', 'Y', 'Z', ''
+                'two', 'Garbled', '1:2/5', 'X', 'Y', 'Z', ''
+            ) | Set-Content -LiteralPath (Join-Path $Script:Ws.Game 'BRNODES.DAT')
+            $r = Invoke-Client -Target $_ -ConfigPath $Script:Ws.Config -ClientArgs @('-Validate')
+            $r.ExitCode | Should -Be 0
+            $r.Output | Should -Match "should start with a BBS index: 'two'"
+        }
+
         It 'rejects a UNC GameFolder, which the DOS game cannot use' {
             (Get-Content $Script:Ws.Config -Raw) -replace
                 "GameFolder  = '[^']*'", "GameFolder  = '\\\\fileserver\\bbs\\BRE_555'" |
@@ -510,32 +561,44 @@ Describe 'Nova Client <_.Name>' -ForEach $Targets {
             @(Get-ChildItem $Script:Ws.Inbound -Filter '*.part').Count | Should -Be 0
         }
 
-        It 'writes the nodelist into the game folder' {
+        It 'puts a first nodelist in inbound, where the game takes packets in' {
+            # Where a nodelist the hub sends as a packet lands. It used to go
+            # in the game folder, which the game does not read for packets.
+            Remove-Item -LiteralPath (Join-Path $Script:Ws.Game 'BRNODES.DAT')
             $null = Invoke-Client -Target $_ -ConfigPath $Script:Ws.Config -ClientArgs @('-Once')
-            Test-Path (Join-Path $Script:Ws.Game 'BRNODES.555') | Should -BeTrue
+            Test-Path (Join-Path $Script:Ws.Inbound 'BRNODES.555') | Should -BeTrue
+            Test-Path (Join-Path $Script:Ws.Game 'BRNODES.555') | Should -BeFalse
         }
 
         It 'stops asking for the nodelist once it has one' {
             # The default. The hub queues a changed nodelist as an ordinary
             # packet, so polling for it every sync is waste - a nodelist changes
             # once or twice a year. The first run has nothing locally and must
-            # bootstrap; the second must not ask at all.
+            # bootstrap; the second, with one waiting in inbound, must not ask.
+            Remove-Item -LiteralPath (Join-Path $Script:Ws.Game 'BRNODES.DAT')
             $first = Invoke-Client -Target $_ -ConfigPath $Script:Ws.Config `
                 -ClientArgs @('-Once', '-Verbose')
             $first.Output | Should -Match 'No local BRNODES\.555 yet'
-            Test-Path (Join-Path $Script:Ws.Game 'BRNODES.555') | Should -BeTrue
 
             $second = Invoke-Client -Target $_ -ConfigPath $Script:Ws.Config `
                 -ClientArgs @('-Once', '-Verbose')
-            $second.Output | Should -Match 'Have BRNODES\.555 already'
+            $second.Output | Should -Match 'Have a nodelist for 555B already'
             # -Verbose echoes every request, so this proves no call was made
             # rather than merely that no file was written.
             $second.Output | Should -Not -Match 'leagues/555B/nodelist'
         }
 
+        It 'does not ask for a nodelist when the game has its nodes file' {
+            # Once the game has taken a nodelist in, the inbound copy is gone
+            # but brnodes.dat holds it. Asking again would bootstrap forever.
+            $r = Invoke-Client -Target $_ -ConfigPath $Script:Ws.Config -ClientArgs @('-Once', '-Verbose')
+            $r.Output | Should -Match 'Have a nodelist for 555B already'
+            $r.Output | Should -Not -Match 'leagues/555B/nodelist'
+        }
+
         It 'does not re-download an unchanged nodelist' {
             Set-NodelistCheck -ConfigPath $Script:Ws.Config -Mode 'always'
-            $nodelist = Join-Path $Script:Ws.Game 'BRNODES.555'
+            $nodelist = Join-Path $Script:Ws.Inbound 'BRNODES.555'
 
             $first = Invoke-Client -Target $_ -ConfigPath $Script:Ws.Config -ClientArgs @('-Once')
             $first.Output | Should -Match 'Updated nodelist BRNODES\.555'
@@ -562,7 +625,7 @@ Describe 'Nova Client <_.Name>' -ForEach $Targets {
 
         It 'picks up a nodelist that has actually changed' {
             Set-NodelistCheck -ConfigPath $Script:Ws.Config -Mode 'always'
-            $nodelist = Join-Path $Script:Ws.Game 'BRNODES.555'
+            $nodelist = Join-Path $Script:Ws.Inbound 'BRNODES.555'
             $null = Invoke-Client -Target $_ -ConfigPath $Script:Ws.Config -ClientArgs @('-Once')
 
             $token = (Invoke-RestMethod -Method Post -Uri "$Script:HubUrl/service/api/v1/auth/token" `
@@ -582,7 +645,7 @@ Describe 'Nova Client <_.Name>' -ForEach $Targets {
             # Belt and braces for an older hub, or a lost state file: identical
             # bytes must not churn a file the door game may have open.
             Set-NodelistCheck -ConfigPath $Script:Ws.Config -Mode 'always'
-            $nodelist = Join-Path $Script:Ws.Game 'BRNODES.555'
+            $nodelist = Join-Path $Script:Ws.Inbound 'BRNODES.555'
             $null = Invoke-Client -Target $_ -ConfigPath $Script:Ws.Config -ClientArgs @('-Once')
             Remove-Item -LiteralPath (Join-Path $Script:Ws.Root 'nodelist-etags.json') -Force
             $stamp = (Get-Item -LiteralPath $nodelist).LastWriteTimeUtc
@@ -692,6 +755,36 @@ Describe 'Nova Client <_.Name>' -ForEach $Targets {
                 # nothing ever hit it.
                 ([regex]::Matches($output, 'Authenticated Successfully')).Count |
                     Should -Be 1 -Because 'the token should be cached across cycles'
+            }
+            finally {
+                Stop-Job $job -ErrorAction SilentlyContinue
+                Remove-Job $job -Force -ErrorAction SilentlyContinue
+            }
+        }
+
+        It 'counts a failed maintenance run and still sends replies after it' {
+            # The mock hub holds a packet for us, so the first sync downloads
+            # it and triggers maintenance. There is no cmd.exe here, so the
+            # maintenance fails: that must be logged, and the upload pass that
+            # follows maintenance must still run.
+            (Get-Content $Script:Ws.Config -Raw).Replace(
+                'RunMaintenanceOnDownload   = $false', 'RunMaintenanceOnDownload   = $true') |
+                Set-Content $Script:Ws.Config
+            $jobShell = $_.Shell
+            $jobScript = $_.Script
+            $jobConfig = $Script:Ws.Config
+            $job = Start-Job -ScriptBlock {
+                & $using:jobShell -NoProfile -ExecutionPolicy Bypass `
+                    -File $using:jobScript -Config $using:jobConfig -Daemon -Verbose
+            }
+            try {
+                Start-Sleep -Seconds 8
+                $output = (Receive-Job $job) | Out-String
+                $output | Should -Match 'running maintenance now'
+                $output | Should -Match 'Could not start|Maintenance failed'
+                $output | Should -Not -Match 'Daemon cycle error'
+                # The sync, then the upload pass straight after maintenance
+                ([regex]::Matches($output, 'Run Summary')).Count | Should -BeGreaterThan 1
             }
             finally {
                 Stop-Job $job -ErrorAction SilentlyContinue

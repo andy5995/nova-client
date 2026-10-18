@@ -94,11 +94,22 @@ $Script:RuntimeLabel = 'PowerShell 5.1'
 #  contract at the top of NovaClient.Common.ps1 describes them.
 # ============================================================================
 
-# Windows PowerShell 5.1 defaults to SSL3/TLS1.0, which every modern hub
-# rejects. Without this line HTTPS fails with "Could not create SSL/TLS
-# secure channel" and no useful detail.
-[Net.ServicePointManager]::SecurityProtocol =
-    [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls11
+# Windows PowerShell 5.1 on an older .NET Framework defaults to SSL3/TLS1.0,
+# which every modern hub rejects. Without this, HTTPS fails with "Could not
+# create SSL/TLS secure channel" and no useful detail.
+#
+# Added to what is there, not assigned. On .NET 4.7+ the default is
+# SystemDefault (0), which lets Windows choose and includes TLS 1.3 where the
+# OS has it; assigning Tls12|Tls11 replaced that, turning 1.3 off and the
+# deprecated 1.1 on. SSL3, TLS 1.0 and 1.1 are removed if present.
+$protocols = [Net.ServicePointManager]::SecurityProtocol
+if ([int]$protocols -ne 0) {
+    $protocols = $protocols -bor [Net.SecurityProtocolType]::Tls12
+    foreach ($old in @('Ssl3', 'Tls', 'Tls11')) {
+        $protocols = $protocols -band -bnot [Net.SecurityProtocolType]$old
+    }
+    [Net.ServicePointManager]::SecurityProtocol = $protocols
+}
 
 # Invoke-WebRequest renders a progress bar per chunk on 5.1, which can slow a
 # download by an order of magnitude. We do our own logging instead.
