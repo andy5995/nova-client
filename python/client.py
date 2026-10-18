@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import sys
 import traceback
 from datetime import datetime, timedelta
@@ -15,6 +16,7 @@ import aiohttp
 import toml
 
 from _version import USER_AGENT, __version__
+from instance_lock import InstanceLock
 
 # Load environment variables
 from dotenv import load_dotenv
@@ -24,13 +26,54 @@ load_dotenv()
 # Config sections name the game; the hub's league ids carry its letter.
 GAME_LETTERS = {"BRE": "B", "FE": "F"}
 
+# The hub refuses larger uploads, so a larger download is not a packet.
+MAX_PACKET_SIZE = 10 * 1024 * 1024
+
+# Worth another try: the hub, or the proxy in front of it, is briefly
+# unavailable or asking us to slow down. Anything else will fail the same way.
+RETRY_STATUSES = {408, 429, 500, 502, 503, 504}
+MAX_RETRY_AFTER = 60
+
+# Re-authenticate this long before the hub says the token expires.
+TOKEN_MARGIN = timedelta(seconds=60)
+
+SENT_ACTIONS = ("delete", "archive")
+
+# fullmatch, not match with $: $ also matches before a trailing newline.
+PACKET_NAME = re.compile(r"[0-9]{3}[BF][0-9A-F]{4}\.[0-9]{3}", re.IGNORECASE)
+NODELIST_NAME = re.compile(r"(BR|FE)NODES\.[0-9]{3}", re.IGNORECASE)
+
+
+def hub_league_id(game_type: str, league_number: str) -> str:
+    """The hub's id for a config league: [leagues.BRE.555] is "555B"."""
+    letter = GAME_LETTERS.get(game_type.upper())
+    if letter is None:
+        raise ValueError(
+            f"[leagues.{game_type}.{league_number}]: unknown game '{game_type}' (use BRE or FE)"
+        )
+    return f"{league_number}{letter}"
+
+
+class ResponseTooLarge(Exception):
+    pass
+
 
 class NovaHubClient:
     """One-shot client for syncing packets with Nova Hub"""
 
-    def __init__(self, config_path: str = "config.toml", verbose: bool = False):
+    def __init__(
+        self,
+        config_path: str = "config.toml",
+        verbose: bool = False,
+        token_cache: Optional[dict] = None,
+    ):
         self.verbose = verbose
+        self.config_path = config_path
         self.config = self.load_config(config_path)
+        # The daemon passes the same dict every cycle, so one token lasts
+        # until it expires or the hub refuses it.
+        self.token_cache = token_cache if token_cache is not None else {}
+        self.upload_only = False
         self.metrics: Dict[str, Any] = {
             "start_time": datetime.now().isoformat(),
             "leagues": {},
@@ -48,29 +91,41 @@ class NovaHubClient:
         # A BBS can be set up before it joins any league
         config.setdefault("leagues", {})
 
-        # Override with environment variables
-        config["hub"]["client_id"] = os.getenv(
-            "HUB_CLIENT_ID", config["hub"].get("client_id", "")
-        )
-        config["hub"]["client_secret"] = os.getenv(
-            "HUB_CLIENT_SECRET", config["hub"].get("client_secret", "")
-        )
+        hub = config.setdefault("hub", {})
+        if not hub.get("url"):
+            raise ValueError("hub.url must be set in config")
+        # A trailing slash would make every path //service/..., which the hub 404s
+        hub["url"] = hub["url"].rstrip("/")
 
-        if not config["hub"]["client_id"] or not config["hub"]["client_secret"]:
+        # Override with environment variables. An empty one, as an unset
+        # entry in an EnvironmentFile leaves, does not count.
+        hub["client_id"] = os.getenv("HUB_CLIENT_ID") or hub.get("client_id", "")
+        hub["client_secret"] = os.getenv("HUB_CLIENT_SECRET") or hub.get("client_secret", "")
+
+        if not hub["client_id"] or not hub["client_secret"]:
             raise ValueError(
                 "Client ID and Secret must be set in config or environment"
+            )
+
+        sent_action = config.get("sync", {}).get("sent_action", "delete")
+        if sent_action not in SENT_ACTIONS:
+            # Anything else left each packet in outbound, to be sent again every sync
+            raise ValueError(
+                f"sync.sent_action must be 'delete' or 'archive', got '{sent_action}'"
             )
 
         # Validate that each enabled league has bbs_index configured (as integer, 1-255)
         for game_type, leagues in config.get("leagues", {}).items():
             for league_number, league_config in leagues.items():
                 if league_config.get("enabled", True):
+                    hub_league_id(game_type, league_number)
                     bbs_index = league_config.get("bbs_index")
                     if bbs_index is None:
                         raise ValueError(
                             f"League {game_type}.{league_number} is enabled but missing 'bbs_index' configuration"
                         )
-                    if not isinstance(bbs_index, int):
+                    # bool is an int to Python: bbs_index = true would be BBS 1
+                    if isinstance(bbs_index, bool) or not isinstance(bbs_index, int):
                         raise ValueError(
                             f"League {game_type}.{league_number} bbs_index must be an integer, got {type(bbs_index).__name__}"
                         )
@@ -136,23 +191,43 @@ class NovaHubClient:
         if safe_name in (".", "..", ""):
             raise ValueError(f"Invalid filename: {filename}")
 
-        # Validate against expected filename patterns
-        # Packet pattern: <league><game><source><dest>.<seq>
-        # Example: 555B0102.001
-        packet_pattern = r"^[0-9]{3}[BF][0-9A-Fa-f]{4}\.[0-9]{3}$"
-
-        # Nodelist pattern: BRNODES.<league> or FENODES.<league>
-        # Example: BRNODES.555, FENODES.013
-        nodelist_pattern = r"^(BR|FE)NODES\.[0-9]{3}$"
-
-        if not (re.match(packet_pattern, safe_name, re.IGNORECASE) or
-                re.match(nodelist_pattern, safe_name, re.IGNORECASE)):
+        # A packet (555B0102.001) or a nodelist (BRNODES.555, FENODES.013)
+        if not (PACKET_NAME.fullmatch(safe_name) or NODELIST_NAME.fullmatch(safe_name)):
             raise ValueError(f"Filename does not match expected format: {filename}")
 
         return safe_name
 
-    async def run(self):
-        """Execute one complete sync run"""
+    async def run(self, locked: bool = False, upload_only: bool = False):
+        """Execute one complete sync run.
+
+        locked: the caller (the daemon) already holds the instance lock.
+        upload_only: send outbound packets and download nothing, for the pass
+        after maintenance has written replies.
+        """
+        if locked:
+            return await self._run(upload_only)
+
+        lock = InstanceLock(self.config_path)
+        try:
+            acquired = lock.acquire()
+        except OSError as e:
+            # Not being able to lock must not stop a node syncing
+            self.log("WARNING", f"Could not open lock file {lock.path} ({e}); syncing unlocked")
+            return await self._run(upload_only)
+        if not acquired:
+            self.log(
+                "ERROR",
+                "Another nova-client (the daemon, or another client.py) is syncing "
+                "with this config. Try again when it has finished.",
+            )
+            return 1
+        try:
+            return await self._run(upload_only)
+        finally:
+            lock.release()
+
+    async def _run(self, upload_only: bool = False):
+        self.upload_only = upload_only
         self.log("INFO", f"Nova Hub Client {__version__} starting")
         self.log("INFO", f"BBS: {self.config['bbs']['name']}")
         self.log("INFO", f"Hub: {self.config['hub']['url']}")
@@ -167,13 +242,11 @@ class NovaHubClient:
         ) as session:
             self.session = session
 
-            # Get OAuth token
-            token = await self.get_token()
-            if not token:
-                self.log("ERROR", "Failed to obtain OAuth token")
-                return self.finalize()
-
-            self.token = token
+            if not self._cached_token():
+                token = await self.get_token()
+                if not token:
+                    self.log("ERROR", "Failed to obtain OAuth token")
+                    return self.finalize()
 
             if not any(
                 league_config.get("enabled", True)
@@ -214,9 +287,11 @@ class NovaHubClient:
         self.metrics["total_uploaded"] += uploaded
 
         # Step 2: Download inbound packets
-        downloaded = await self.download_inbound(
-            game_type, league_number, league_config
-        )
+        downloaded = 0
+        if not self.upload_only:
+            downloaded = await self.download_inbound(
+                game_type, league_number, league_config
+            )
         self.metrics["leagues"][league_key]["downloaded"] = downloaded
         self.metrics["total_downloaded"] += downloaded
 
@@ -258,7 +333,17 @@ class NovaHubClient:
             success = await self.upload_packet(game_type, league_number, packet_file)
             if success:
                 uploaded += 1
-                await self.handle_sent_file(packet_file)
+                # The hub has the packet. Failing to tidy it away must not
+                # stop this sync before it downloads anything.
+                try:
+                    await self.handle_sent_file(packet_file)
+                except OSError as e:
+                    self.log(
+                        "ERROR",
+                        f"Uploaded {packet_file.name}, but could not remove it from outbound: {e}",
+                        league_number,
+                    )
+                    self.metrics["leagues"][f"{game_type}_{league_number}"]["errors"] += 1
             else:
                 self.log(
                     "ERROR", f"Failed to upload: {packet_file.name}", league_number
@@ -266,6 +351,108 @@ class NovaHubClient:
                 self.metrics["leagues"][f"{game_type}_{league_number}"]["errors"] += 1
 
         return uploaded
+
+    def _cached_token(self) -> Optional[str]:
+        """The token from an earlier sync, if the hub has not said it has expired."""
+        token = self.token_cache.get("access_token")
+        expires_at = self.token_cache.get("expires_at")
+        if token and (expires_at is None or datetime.now() + TOKEN_MARGIN < expires_at):
+            return token
+        return None
+
+    @property
+    def token(self) -> Optional[str]:
+        return self.token_cache.get("access_token")
+
+    async def _request(
+        self,
+        method: str,
+        path: str,
+        league_number: Optional[str] = None,
+        upload: Optional[Path] = None,
+        max_bytes: int = MAX_PACKET_SIZE,
+    ):
+        """Send one API request, retrying where another try can help.
+
+        Retries a connection failure and the statuses in RETRY_STATUSES, up to
+        sync.max_retries attempts, waiting the hub's Retry-After when it gives
+        one. A 401 gets one fresh token and one more try, without spending an
+        attempt: a cached token can expire between syncs.
+
+        Returns (status, body); status is None if every attempt failed to
+        connect. Raises ResponseTooLarge if the body exceeds max_bytes.
+        """
+        url = f"{self.config['hub']['url']}/service/api/v1{path}"
+        max_retries = max(1, self.config.get("sync", {}).get("max_retries", 3))
+        retry_delay = self.config.get("sync", {}).get("retry_delay", 5)
+        reauthenticated = False
+        attempt = 0
+
+        while True:
+            attempt += 1
+            headers = {"Authorization": f"Bearer {self.token}"}
+            body_file = None
+            wait = retry_delay
+            try:
+                if upload is not None:
+                    headers["Content-Type"] = "application/octet-stream"
+                    body_file = open(upload, "rb")
+                async with self.session.request(
+                    method, url, headers=headers, data=body_file
+                ) as resp:
+                    status = resp.status
+                    body = await self._read_capped(resp, max_bytes)
+                    retry_after = resp.headers.get("Retry-After", "")
+            except ResponseTooLarge:
+                raise
+            except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as e:
+                self.log(
+                    "ERROR",
+                    f"{method} {path} failed (attempt {attempt}): {e or type(e).__name__}",
+                    league_number,
+                )
+                if attempt >= max_retries:
+                    return None, b""
+                await asyncio.sleep(wait)
+                continue
+            finally:
+                if body_file is not None:
+                    body_file.close()
+
+            if status == 401 and not reauthenticated:
+                reauthenticated = True
+                attempt -= 1
+                self.token_cache.clear()
+                if await self.get_token():
+                    continue
+                return status, body
+
+            if status in RETRY_STATUSES and attempt < max_retries:
+                if retry_after.isdigit():
+                    wait = min(int(retry_after), MAX_RETRY_AFTER)
+                self.log(
+                    "WARNING",
+                    f"{method} {path}: HTTP {status}, retrying in {wait}s",
+                    league_number,
+                )
+                await asyncio.sleep(wait)
+                continue
+
+            return status, body
+
+    @staticmethod
+    async def _read_capped(resp, max_bytes: int) -> bytes:
+        declared = resp.content_length
+        if declared is not None and declared > max_bytes:
+            raise ResponseTooLarge(f"{declared} bytes")
+        chunks = []
+        size = 0
+        async for chunk in resp.content.iter_chunked(64 * 1024):
+            size += len(chunk)
+            if size > max_bytes:
+                raise ResponseTooLarge(f"over {max_bytes} bytes")
+            chunks.append(chunk)
+        return b"".join(chunks)
 
     async def upload_packet(
         self, game_type: str, league_number: str, packet_file: Path
@@ -278,11 +465,9 @@ class NovaHubClient:
             self.log("ERROR", f"Invalid filename for upload: {e}", league_number)
             return False
 
-        # Max file size limit (10MB)
-        MAX_SIZE = 10 * 1024 * 1024
         try:
             file_size = packet_file.stat().st_size
-            if file_size > MAX_SIZE:
+            if file_size > MAX_PACKET_SIZE:
                 self.log(
                     "ERROR",
                     f"File too large for upload: {filename} ({file_size} bytes)",
@@ -293,56 +478,17 @@ class NovaHubClient:
             self.log("ERROR", f"Could not stat file: {e}", league_number)
             return False
 
-        # Convert game_type to single letter (BRE -> B, FE -> F)
-        game_type_letter = "B" if game_type == "BRE" else "F"
-
-        # Construct league_id with game type (e.g., "555B" or "555F")
-        league_id = f"{league_number}{game_type_letter}"
-
-        # URL with validated filename
-        url = f"{self.config['hub']['url']}/service/api/v1/leagues/{league_id}/packets/{filename}"
-
-        headers = {
-            "Authorization": f"Bearer {self.token}",
-            "Content-Type": "application/octet-stream"
-        }
-
-        max_retries = self.config.get("sync", {}).get("max_retries", 3)
-        retry_delay = self.config.get("sync", {}).get("retry_delay", 5)
-
-        for attempt in range(max_retries):
-            try:
-                # Open file in binary mode for streaming
-                with open(packet_file, "rb") as f:
-                    # PUT request with streaming body
-                    async with self.session.put(url, headers=headers, data=f) as resp:
-                        if resp.status == 200:
-                            self.log("INFO", f"Uploaded: {filename}", league_number)
-                            return True
-                        elif resp.status == 401:
-                            error = await resp.text()
-                            self.log("ERROR", "Token rejected by server", league_number)
-                            self.log_api_response(error, "upload auth error")
-                            return False
-                        else:
-                            error = await resp.text()
-                            self.log(
-                                "ERROR",
-                                f"Upload failed ({resp.status})",
-                                league_number,
-                            )
-                            self.log_api_response(error, "upload error")
-                            return False
-
-            except Exception as e:
-                self.log(
-                    "ERROR",
-                    f"Upload exception (attempt {attempt + 1}): {e}",
-                    league_number,
-                )
-                if attempt < max_retries - 1:
-                    await asyncio.sleep(retry_delay)
-
+        league_id = hub_league_id(game_type, league_number)
+        status, body = await self._request(
+            "PUT", f"/leagues/{league_id}/packets/{filename}",
+            league_number, upload=packet_file, max_bytes=1024 * 1024,
+        )
+        if status == 200:
+            self.log("INFO", f"Uploaded: {filename}", league_number)
+            return True
+        if status is not None:
+            self.log("ERROR", f"Upload failed ({status})", league_number)
+            self.log_api_response(body.decode(errors="replace"), "upload error")
         return False
 
     async def download_inbound(
@@ -387,43 +533,37 @@ class NovaHubClient:
         self, game_type: str, league_number: str, unread: bool = False
     ) -> List[dict]:
         """List packets available at the hub"""
-        # Convert game_type to single letter (BRE -> B, FE -> F)
-        game_type_letter = "B" if game_type == "BRE" else "F"
-
-        # Construct league_id with game type (e.g., "555B" or "555F")
-        league_id = f"{league_number}{game_type_letter}"
-
-        url = f"{self.config['hub']['url']}/service/api/v1/leagues/{league_id}/packets"
-
-        if unread:
-            url += "?unread=true"
-
-        headers = {"Authorization": f"Bearer {self.token}"}
+        league_id = hub_league_id(game_type, league_number)
+        path = f"/leagues/{league_id}/packets" + ("?unread=true" if unread else "")
 
         try:
-            async with self.session.get(url, headers=headers) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    self.log_api_response(json.dumps(data), "list packets")
-                    return data.get("packets", [])
-                elif resp.status == 401:
-                    error = await resp.text()
-                    self.log("ERROR", "Token rejected when listing packets")
-                    self.log_api_response(error, "list packets auth error")
-                    return []
-                else:
-                    error = await resp.text()
-                    self.log("ERROR", f"List packets failed ({resp.status})")
-                    self.log_api_response(error, "list packets error")
-                    return []
-        except Exception as e:
-            self.log("ERROR", f"List packets exception: {e}")
+            status, body = await self._request("GET", path, league_number)
+        except ResponseTooLarge as e:
+            self.log("ERROR", f"Packet list too large ({e})", league_number)
             return []
+        if status == 200:
+            try:
+                data = json.loads(body)
+            except ValueError:
+                self.log("ERROR", "List packets: the hub's reply is not JSON", league_number)
+                return []
+            self.log_api_response(json.dumps(data), "list packets")
+            return data.get("packets", [])
+        if status is not None:
+            self.log("ERROR", f"List packets failed ({status})", league_number)
+            self.log_api_response(body.decode(errors="replace"), "list packets error")
+        return []
 
     async def download_packet(
         self, game_type: str, league_number: str, filename: str, inbound_dir: Path
     ) -> bool:
-        """Download a single packet from the hub"""
+        """Download a single packet from the hub.
+
+        The hub counts a packet as delivered once it has sent it, so a
+        truncated file would be the only copy this BBS ever gets. It is written
+        to a .part file and renamed into place only once it is complete; the
+        game never sees a partial packet.
+        """
         # Defense-in-depth: validate filename even though caller should sanitize
         try:
             filename = self.sanitize_filename(filename)
@@ -431,57 +571,39 @@ class NovaHubClient:
             self.log("ERROR", f"Invalid filename in download_packet: {e}", league_number)
             return False
 
-        # Convert game_type to single letter (BRE -> B, FE -> F)
-        game_type_letter = "B" if game_type == "BRE" else "F"
+        league_id = hub_league_id(game_type, league_number)
+        try:
+            status, body = await self._request(
+                "GET", f"/leagues/{league_id}/packets/{filename}", league_number
+            )
+        except ResponseTooLarge as e:
+            self.log("ERROR", f"Refused {filename}: larger than a packet can be ({e})", league_number)
+            return False
 
-        # Construct league_id with game type (e.g., "555B" or "555F")
-        league_id = f"{league_number}{game_type_letter}"
-
-        url = f"{self.config['hub']['url']}/service/api/v1/leagues/{league_id}/packets/{filename}"
-
-        headers = {"Authorization": f"Bearer {self.token}"}
+        if status != 200:
+            if status is not None:
+                self.log("ERROR", f"Download failed ({status})", league_number)
+                self.log_api_response(body.decode(errors="replace"), "download error")
+            return False
 
         dest_file = inbound_dir / filename
-
-        max_retries = self.config.get("sync", {}).get("max_retries", 3)
-        retry_delay = self.config.get("sync", {}).get("retry_delay", 5)
-
-        for attempt in range(max_retries):
-            try:
-                async with self.session.get(url, headers=headers) as resp:
-                    if resp.status == 200:
-                        content = await resp.read()
-                        dest_file.write_bytes(content)
-                        self.log(
-                            "INFO",
-                            f"Downloaded: {filename} ({len(content)} bytes)",
-                            league_number,
-                        )
-                        return True
-                    elif resp.status == 401:
-                        error = await resp.text()
-                        self.log("ERROR", "Token rejected when downloading packet")
-                        self.log_api_response(error, "download auth error")
-                        return False
-                    else:
-                        error = await resp.text()
-                        self.log("ERROR", f"Download failed ({resp.status})")
-                        self.log_api_response(error, "download error")
-                        return False
-
-            except Exception as e:
-                self.log("ERROR", f"Download exception (attempt {attempt + 1}): {e}")
-                if attempt < max_retries - 1:
-                    await asyncio.sleep(retry_delay)
-
-        return False
+        part_file = dest_file.with_name(dest_file.name + ".part")
+        try:
+            part_file.write_bytes(body)
+            os.replace(part_file, dest_file)
+        except OSError as e:
+            self.log("ERROR", f"Could not write {dest_file}: {e}", league_number)
+            part_file.unlink(missing_ok=True)
+            return False
+        self.log("INFO", f"Downloaded: {filename} ({len(body)} bytes)", league_number)
+        return True
 
     async def handle_sent_file(self, packet_file: Path):
         """Handle a packet file after successful upload"""
         action = self.config.get("sync", {}).get("sent_action", "delete")
 
         if action == "delete":
-            packet_file.unlink()
+            packet_file.unlink(missing_ok=True)
             self.log("DEBUG", f"Deleted: {packet_file.name}")
 
         elif action == "archive":
@@ -496,7 +618,14 @@ class NovaHubClient:
                 return
 
             dest = archive_dir / safe_name
-            packet_file.rename(dest)
+            # Sequence numbers wrap at 999 and restart after a game reset, so
+            # the archive often has this name already. os.replace overwrites
+            # it, where rename raises on Windows; shutil.move handles an
+            # archive on another drive or mount.
+            try:
+                os.replace(packet_file, dest)
+            except OSError:
+                shutil.move(str(packet_file), str(dest))
             self.log("DEBUG", f"Archived: {safe_name}")
 
     def is_packet_file(
@@ -505,10 +634,11 @@ class NovaHubClient:
         """Check if a file is a valid packet file for this league"""
         # Pattern: <league><game><source><dest>.<seq>
         # Example: 555B0102.001
-        pattern = (
-            rf"^{league_number}{game_type[0]}([0-9A-F]{{2}})[0-9A-F]{{2}}\.\d{{3}}$"
-        )
-        match = re.match(pattern, filename, re.IGNORECASE)
+        letter = GAME_LETTERS.get(game_type.upper())
+        if letter is None:
+            return False
+        pattern = rf"{league_number}{letter}([0-9A-F]{{2}})[0-9A-F]{{2}}\.\d{{3}}"
+        match = re.fullmatch(pattern, filename, re.IGNORECASE)
 
         if not match:
             return False
@@ -521,7 +651,7 @@ class NovaHubClient:
         return source_hex == our_bbs_hex
 
     async def get_token(self) -> Optional[str]:
-        """Get OAuth token from the hub"""
+        """Get OAuth token from the hub, and keep it for later syncs"""
         url = f"{self.config['hub']['url']}/service/api/v1/auth/token"
 
         data = {
@@ -539,6 +669,15 @@ class NovaHubClient:
                     if self.verbose:
                         masked = {**token_data, "access_token": "***masked***"}
                         self.log_api_response(json.dumps(masked), "token")
+                    self.token_cache.clear()
+                    self.token_cache["access_token"] = token_data["access_token"]
+                    # Older hubs do not say; the token is then kept
+                    # until the hub refuses it.
+                    expires_in = token_data.get("expires_in")
+                    if isinstance(expires_in, int) and not isinstance(expires_in, bool):
+                        self.token_cache["expires_at"] = datetime.now() + timedelta(
+                            seconds=expires_in
+                        )
                     return token_data["access_token"]
                 else:
                     error = await resp.text()

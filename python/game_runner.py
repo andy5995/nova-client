@@ -10,11 +10,37 @@ with automatic queuing.
 import asyncio
 import os
 import platform
+import signal
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Optional
+
+
+# cmd.exe (Windows) and COMMAND.COM (the batch file under dosemu) give these
+# a meaning of their own: chaining, redirection, variables. None belongs in a
+# game command or its arguments, and a line break would end the batch line.
+UNSAFE_COMMAND_CHARS = set('&|<>^%"\r\n')
+UNSAFE_PATH_CHARS = set("\r\n")
+
+
+def unsafe_chars(value: str, unsafe=UNSAFE_COMMAND_CHARS) -> str:
+    """The characters in value the game command must not contain, if any."""
+    return "".join(sorted(set(str(value)) & unsafe))
+
+
+def check_command(league_config: dict, game_type: str) -> str:
+    """Why this league's game command cannot be run safely; "" if it can."""
+    for key, default, unsafe in (
+        ("game_command", game_type, UNSAFE_COMMAND_CHARS),
+        ("maintenance_args", "PLANETARY", UNSAFE_COMMAND_CHARS),
+        ("game_dos_path", "", UNSAFE_PATH_CHARS),
+    ):
+        bad = unsafe_chars(league_config.get(key, default), unsafe)
+        if bad:
+            return f"{key} contains {bad!r}, which the command shell would act on"
+    return ""
 
 
 @dataclass
@@ -126,6 +152,16 @@ class GameRunner:
 
         # Build full command string for logging
         full_command = f"{game_command} {maintenance_args}"
+
+        refused = check_command(league_config, game_type)
+        if refused:
+            return GameRunResult(
+                success=False,
+                game_type=game_type,
+                league_id=league_id,
+                command=full_command,
+                error=refused,
+            )
 
         # Acquire lock (queue if another run is in progress)
         lock = self._get_lock(game_folder)
@@ -243,28 +279,43 @@ class GameRunner:
                 # Use shell=True to run through cmd.exe for DOS/legacy program compatibility.
                 # Without shell=True, subprocess.run fails with WinError 87 on DOS executables
                 # because they can't handle the way Python sets up process I/O handles.
-                cmd_str = ' '.join(full_cmd)
+                # list2cmdline quotes a game folder with a space in it; the
+                # characters cmd.exe would act on were refused before this.
+                cmd_str = subprocess.list2cmdline(full_cmd)
 
-                result = subprocess.run(
+                process = subprocess.Popen(
                     cmd_str,
                     cwd=str(game_folder),
                     shell=True,
-                    capture_output=True,
-                    timeout=timeout,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
                 )
+                try:
+                    stdout, stderr = process.communicate(timeout=timeout)
+                except subprocess.TimeoutExpired:
+                    # Killing cmd.exe alone, as subprocess.run does, leaves the
+                    # game running with our pipes open, and reading them to the
+                    # end then waits for it forever. Kill the whole tree.
+                    subprocess.run(
+                        ["taskkill", "/F", "/T", "/PID", str(process.pid)],
+                        capture_output=True,
+                    )
+                    try:
+                        process.communicate(timeout=30)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                    return {
+                        "success": False,
+                        "output": "",
+                        "return_code": -1,
+                        "error": f"Timeout after {timeout} seconds"
+                    }
                 return {
-                    "success": result.returncode == 0,
-                    "output": result.stdout.decode('utf-8', errors='replace') +
-                              result.stderr.decode('utf-8', errors='replace'),
-                    "return_code": result.returncode,
-                    "error": "" if result.returncode == 0 else f"Exit code: {result.returncode}"
-                }
-            except subprocess.TimeoutExpired:
-                return {
-                    "success": False,
-                    "output": "",
-                    "return_code": -1,
-                    "error": f"Timeout after {timeout} seconds"
+                    "success": process.returncode == 0,
+                    "output": stdout.decode('utf-8', errors='replace') +
+                              stderr.decode('utf-8', errors='replace'),
+                    "return_code": process.returncode,
+                    "error": "" if process.returncode == 0 else f"Exit code: {process.returncode}"
                 }
             except FileNotFoundError:
                 return {
@@ -394,8 +445,8 @@ class GameRunner:
                     process.communicate(),
                     timeout=timeout
                 )
-            except asyncio.TimeoutError:
-                process.kill()
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                self._kill_tree(process.pid)
                 await process.wait()
                 raise
 
@@ -437,6 +488,33 @@ class GameRunner:
         finally:
             # Cleanup batch file
             batch_file.unlink(missing_ok=True)
+
+    @staticmethod
+    def _kill_tree(pid: int) -> None:
+        """SIGKILL pid and every process under it.
+
+        script(1) runs dosemu in a session of its own, on a pty of its own, so
+        neither killing script nor its process group reaches dosemu. All
+        dosemu would get is the pty's hangup, which it need not act on, and it
+        would go on holding the game's files after a timeout or shutdown.
+        """
+        children: Dict[int, list] = {}
+        for stat in Path("/proc").glob("[0-9]*/stat"):
+            try:
+                ppid = int(stat.read_text().rsplit(")", 1)[1].split()[1])
+            except (OSError, IndexError, ValueError):
+                continue
+            children.setdefault(ppid, []).append(int(stat.parent.name))
+        tree, stack = [], [pid]
+        while stack:
+            current = stack.pop()
+            tree.append(current)
+            stack.extend(children.get(current, []))
+        for target in tree:
+            try:
+                os.kill(target, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
 
     @staticmethod
     def _describe_failure(

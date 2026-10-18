@@ -32,6 +32,7 @@ import toml
 
 from _version import __version__
 from client import NovaHubClient
+from instance_lock import InstanceLock
 from game_runner import GameRunner, GameRunResult
 
 
@@ -59,6 +60,14 @@ class NovaDaemon:
         # Timing state
         self._last_sync: Optional[datetime] = None
         self._last_maintenance: Optional[datetime] = None
+
+        # One token for every sync until it expires or the hub refuses it,
+        # rather than a fresh one each cycle (#20)
+        self._token_cache: Dict[str, Any] = {}
+
+        # Shared with client.py run by hand: see instance_lock.py
+        self._lock = InstanceLock(config_path)
+        self._lock_usable = True
 
         # Statistics
         self.stats: Dict[str, Any] = {
@@ -122,6 +131,13 @@ class NovaDaemon:
 
         # Setup signal handlers
         self._setup_signal_handlers()
+
+        if not daemon_config["enabled"]:
+            # Exiting would not stop it: the systemd unit restarts on any exit
+            self.log("INFO", "daemon.enabled is false; not syncing. Waiting to be stopped.")
+            await self._shutdown_event.wait()
+            self.log("INFO", "Daemon shutting down...")
+            return
 
         # Run initial sync immediately
         self.log("INFO", "Running initial sync...")
@@ -191,15 +207,48 @@ class NovaDaemon:
         self.log("INFO", "Daemon shutting down...")
         self._print_stats()
 
+    async def _hold_lock(self) -> bool:
+        """Wait for a hand-run client.py to finish. False if shut down first."""
+        if not self._lock_usable:
+            return True
+        waiting = False
+        while not self._shutdown:
+            try:
+                if self._lock.acquire():
+                    return True
+            except OSError as e:
+                self.log("WARNING", f"Could not open lock file {self._lock.path} ({e}); running unlocked")
+                self._lock_usable = False
+                return True
+            if not waiting:
+                self.log("INFO", "Another nova-client is syncing with this config; waiting for it")
+                waiting = True
+            try:
+                await asyncio.wait_for(self._shutdown_event.wait(), timeout=1)
+            except asyncio.TimeoutError:
+                pass
+        return False
+
     async def _run_sync(self):
-        """Run a single sync cycle"""
+        """Run a single sync cycle, and any maintenance it triggers"""
+        if not await self._hold_lock():
+            return
+        try:
+            await self._sync_locked()
+        finally:
+            self._lock.release()
+
+    def _client(self) -> NovaHubClient:
+        # A new client each cycle, so edits to the config take effect
+        return NovaHubClient(self.config_path, verbose=self.verbose, token_cache=self._token_cache)
+
+    async def _sync_locked(self):
         self.log("INFO", "=" * 50)
         self.log("INFO", "Starting sync cycle")
 
         try:
-            # Create a new client instance for each sync
-            client = NovaHubClient(self.config_path, verbose=self.verbose)
-            exit_code = await client.run()
+            client = self._client()
+            exit_code = await client.run(locked=True)
 
             self._last_sync = datetime.now()
             self.stats["sync_count"] += 1
@@ -222,6 +271,7 @@ class NovaDaemon:
             if downloaded > 0 and self.config["daemon"].get("run_maintenance_on_download", True):
                 self.log("INFO", "Packets downloaded - triggering immediate maintenance")
                 await self._run_triggered_maintenance()
+                await self._upload_replies()
 
         except Exception as e:
             self.log("ERROR", f"Sync failed: {e}")
@@ -229,12 +279,33 @@ class NovaDaemon:
             if self.verbose:
                 traceback.print_exc()
 
+    async def _upload_replies(self):
+        """Send what maintenance just wrote, rather than at the next sync"""
+        try:
+            client = self._client()
+            await client.run(locked=True, upload_only=True)
+            uploaded = client.metrics.get("total_uploaded", 0)
+            errors = len(client.metrics.get("errors", []))
+            self.stats["packets_uploaded"] += uploaded
+            self.stats["errors"] += errors
+            self.log("INFO", f"Post-maintenance upload: uploaded={uploaded}, errors={errors}")
+        except Exception as e:
+            self.log("ERROR", f"Post-maintenance upload failed: {e}")
+            self.stats["errors"] += 1
+            if self.verbose:
+                traceback.print_exc()
+
     async def _run_scheduled_maintenance(self):
         """Run scheduled maintenance for all leagues"""
-        self.log("INFO", "=" * 50)
-        self.log("INFO", "Starting scheduled maintenance")
-        await self._run_maintenance("scheduled")
-        self._last_maintenance = datetime.now()
+        if not await self._hold_lock():
+            return
+        try:
+            self.log("INFO", "=" * 50)
+            self.log("INFO", "Starting scheduled maintenance")
+            await self._run_maintenance("scheduled")
+            self._last_maintenance = datetime.now()
+        finally:
+            self._lock.release()
 
     async def _run_triggered_maintenance(self):
         """Run maintenance triggered by packet download"""

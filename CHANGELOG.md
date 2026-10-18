@@ -7,6 +7,53 @@ Python-only release, which is the code that had been running in production.
 
 ## [Unreleased]
 
+### Fixed (Python client)
+
+- **A download interrupted by a 502, 503 or a full disk could lose the packet.** The hub
+  counts a packet delivered once it has sent it, but the client gave up on any non-200 reply
+  at once and wrote straight into the inbound directory. Requests now retry 408, 429 (waiting
+  the hub's `Retry-After`) and 5xx as well as dropped connections, up to `sync.max_retries`.
+  Packets are written to `.part` and renamed into place, and a reply over 10 MB is refused.
+- **The daemon fetched a new token every sync cycle** (#20). It now keeps one until the hub's
+  `expires_in` is near or the hub refuses it, and a refused token is replaced and the request
+  retried once, in `client.py` too.
+- **Archiving a sent packet whose name was already in `archive_dir` crashed the sync on
+  Windows**, before it downloaded anything, and every later sync sent the packet again.
+  Sequence numbers wrap and restart after a game reset, so this was a matter of time. The
+  archive is overwritten, a different drive works, and a failure to tidy up a sent packet is
+  logged without stopping the sync.
+- **On Windows, a maintenance timeout could hang the daemon for good** (#22). Killing
+  `cmd.exe` left the game running with the output pipe open, and Python waited on it. The
+  whole process tree is killed. A game folder with a space in it is quoted.
+- **On Linux, a timeout or shutdown left dosemu running.** script(1) puts dosemu in a session
+  of its own, so killing script never reached it. The whole tree is killed now.
+- `[leagues.bre.555]` was treated as Falcon's Eye, and `bbs_index = true` as BBS 1. A
+  trailing slash on `hub.url` made every request 404, and an empty `HUB_CLIENT_ID` in the
+  environment overrode the config. A packet name with a trailing newline passed the name
+  check.
+- `python validator.py`, as the README says to run it, did nothing and exited 0.
+
+### Added (Python client)
+
+- `client.py` and the daemon take a lock beside the config (`config.toml.lock`), so a
+  hand-run sync cannot run alongside the daemon's. The daemon waits; `client.py` exits 1.
+- After the maintenance that new packets trigger, the daemon uploads the replies at once
+  rather than at the next sync.
+- `daemon.enabled = false` is honoured: the daemon starts and waits, without syncing.
+  (Exiting would only have been restarted by systemd.)
+- The validator checks `[hub]`, `sync.sent_action`, the game type and `bbs_index`, as
+  `client.py` does. It warns about nodes no `HOST` line routes through the hub (#19). It
+  refuses game commands, arguments or DOS paths with `& | < > ^ % "` or a line break, and so
+  does the daemon.
+
+### Changed (Python client)
+
+- A missing `brnodes.dat` / `fenodes.dat` is a warning rather than an error, as it is in the
+  PowerShell client. A new node has none until it has processed the hub's first nodelist, and
+  the error stopped the systemd unit starting, so it never fetched one.
+- An unknown `sync.sent_action` is refused at start. It used to leave every packet in
+  outbound, to be sent again each sync.
+
 ### Changed
 
 - **Python dependencies are locked with uv.** `pyproject.toml` at the repo root lists
