@@ -58,7 +58,9 @@
         # is what a brand new node needs so it does not sit blind until the next
         # hub-side regeneration.
         #
-        #   'bootstrap'  fetch only when the local nodelist is missing (default)
+        #   'bootstrap'  fetch only when the local nodelist is missing: none in
+        #                the game folder, none waiting in inbound (default).
+        #                It is written to inbound, for the game to take in.
         #   'always'     poll every sync (conditional request; needs a hub that
         #                answers 304, or it re-downloads each time)
         #   'never'      never fetch directly; rely purely on the packet queue
@@ -100,8 +102,8 @@
             OutboundDir = 'C:\BBS\DOORS\bre_015\OUTBOUND'
             InboundDir  = 'C:\BBS\DOORS\bre_015\INBOUND'
 
-            # Required for -Daemon. This is where BRE.EXE lives, and where the
-            # nodelist gets written.
+            # Required for -Daemon. This is where BRE.EXE lives, and where its
+            # brnodes.dat tells the client this node already has a nodelist.
             GameFolder      = 'C:\BBS\DOORS\BRE_015'
             GameCommand     = 'BRE'
             MaintenanceArgs = 'PLANETARY'

@@ -25,6 +25,7 @@ sent/
 logs/
 dosemu_configs/
 metrics.json
+nodelist-etags.json
 *.part
 # instance_lock.py: one sync at a time per config
 *.toml.lock

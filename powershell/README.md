@@ -99,8 +99,14 @@ twice a year; polling for that would be pure waste.
 
 The one gap is a node that has *never* had a nodelist — freshly registered, or a rebuilt game
 directory — which would otherwise sit blind until the next regeneration. So `Sync.NodelistCheck`
-defaults to `'bootstrap'`: ask the hub directly only when there is no local nodelist at all.
+defaults to `'bootstrap'`: ask the hub directly only when there is no local nodelist at all,
+meaning no `brnodes.dat` / `fenodes.dat` in the game folder and no `BRNODES.<league>` waiting
+in inbound. What it fetches goes in the inbound folder, as a nodelist sent as a packet does,
+and the game takes it in at its next maintenance.
 Set it to `'always'` to poll every sync anyway, or `'never'` to rely purely on the packet queue.
+
+`-Validate` warns about any node in the nodes file that no `HOST` line routes for: the game
+sends to such a node directly, past the hub.
 
 ## Running unattended
 
@@ -149,8 +155,10 @@ files open.
 **`403` on upload.** Your `BbsIndex` does not match what the hub has for you in that league,
 or your client is not an active member of it. Run `-Validate`, then check with the sysop.
 
-**`Could not create SSL/TLS secure channel`** on 5.1 for an `https://` hub. The script forces
-TLS 1.2, so if you still see this the machine is old enough to need
+**`Could not create SSL/TLS secure channel`** on 5.1 for an `https://` hub. Where .NET leaves
+the choice to Windows, the script does too (that includes TLS 1.3 where Windows has it);
+otherwise it adds TLS 1.2 and drops SSL 3, TLS 1.0 and 1.1. If you still see this, the machine
+is old enough to need
 [the .NET TLS 1.2 update](https://learn.microsoft.com/en-us/security/engineering/solving-tls1-problem).
 
 **Nothing uploads, and no error.** The client only sends files whose *source* index is yours —
@@ -159,7 +167,12 @@ filename: `555B0201.001` means league 555, BRE, from BBS `02`, to BBS `01`.
 
 **The daemon exits immediately with code 3.** Another copy is already running against the same
 config. That is the single-instance guard; two daemons on one config would fight over the same
-packets and the same game folder.
+packets and the same game folder. "Under another account" means the scheduled task (as SYSTEM)
+has it, and a `-Once` from your own prompt has to wait for the task to be stopped.
+
+**`holds a character cmd.exe would act on`.** `GameCommand` and `MaintenanceArgs` run as
+`cmd /c <command> <args>`, so `& | < > ^ % "` and line breaks are refused rather than handed
+to cmd.exe. The game needs none of them.
 
 **Files named `*.part` in the inbound folder.** A download was interrupted. They are harmless
 and get cleaned up on the next attempt — packets are written to `.part` first and only renamed
