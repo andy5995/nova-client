@@ -6,6 +6,7 @@ Validates:
 - No duplicate directories across league entries
 - Nodes.dat files exist and are parseable
 - BBS index and name match in nodes.dat
+- Hub credentials are set, and each game command is safe to hand a shell
 """
 
 import os
@@ -16,6 +17,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import toml
 
+from client import GAME_LETTERS, SENT_ACTIONS
+from game_runner import check_command
 from nodes_parser import NodesFileParser
 
 
@@ -176,10 +179,15 @@ class ClientValidator:
         nodes_file = self.find_file_case_insensitive(game_folder_path, nodes_filename)
 
         if not nodes_file:
-            self.errors.append(
+            # A new node has none until the game takes in the hub's first
+            # nodelist. Failing here stopped the daemon starting, so it never
+            # fetched one.
+            self.warnings.append(
                 ValidationError(
                     "NodesFile",
-                    f"{league_key}: {nodes_filename} not found in {game_folder}"
+                    f"{league_key}: {nodes_filename} not found in {game_folder} "
+                    "(expected until the first nodelist from the hub is processed)",
+                    severity="WARNING"
                 )
             )
             return
@@ -195,6 +203,8 @@ class ClientValidator:
                     )
                 )
             return
+
+        self.check_routing(league_key, nodes_filename, parser)
 
         # Check for duplicate indices
         duplicates = parser.check_duplicate_indices()
@@ -250,6 +260,64 @@ class ClientValidator:
                 )
             )
 
+    def check_routing(self, league_key: str, nodes_filename: str, parser: NodesFileParser) -> None:
+        """Warn about nodes no HOST line routes for (#19).
+
+        "1 HOST 2 3" tells the game to send traffic for 2 and 3 through 1, the
+        hub. A node outside every HOST line is sent to directly, past the hub.
+        A sysop can still override this on their own side.
+        """
+        hosts = {n.bbs_index for n in parser.nodes if n.routing_targets}
+        routed = {t for n in parser.nodes for t in n.routing_targets}
+        direct = sorted(
+            n.bbs_index for n in parser.nodes
+            if n.bbs_index not in hosts and n.bbs_index not in routed
+        )
+        if direct:
+            self.warnings.append(
+                ValidationError(
+                    "NodesFile",
+                    f"{league_key}: {nodes_filename}: no HOST line routes for "
+                    f"{', '.join(map(str, direct))}, so the game sends to "
+                    f"{'it' if len(direct) == 1 else 'them'} directly rather than through the hub",
+                    severity="WARNING"
+                )
+            )
+
+    def validate_hub(self) -> None:
+        """The hub section, as client.py will read it (environment first)"""
+        assert self.config is not None
+        hub = self.config.get("hub")
+        if not isinstance(hub, dict):
+            self.errors.append(ValidationError("Config", "Missing [hub] section"))
+            return
+        if not hub.get("url"):
+            self.errors.append(ValidationError("Config", "hub.url not configured"))
+        for key, env in (("client_id", "HUB_CLIENT_ID"), ("client_secret", "HUB_CLIENT_SECRET")):
+            if not (os.getenv(env) or hub.get(key)):
+                self.errors.append(
+                    ValidationError("Config", f"hub.{key} not configured (nor {env} in the environment)")
+                )
+
+    def validate_league(self, game_type: str, league_id: str, league_config: dict) -> None:
+        """What client.py would refuse to start with, and commands it would not run"""
+        league_key = f"{game_type}.{league_id}"
+        if game_type.upper() not in GAME_LETTERS:
+            self.errors.append(
+                ValidationError("Config", f"{league_key}: unknown game '{game_type}' (use BRE or FE)")
+            )
+        bbs_index = league_config.get("bbs_index")
+        # bool is an int to Python: bbs_index = true would be BBS 1
+        if bbs_index is not None and (
+            isinstance(bbs_index, bool) or not isinstance(bbs_index, int) or not 1 <= bbs_index <= 255
+        ):
+            self.errors.append(
+                ValidationError("Config", f"{league_key}: bbs_index must be a whole number from 1 to 255, got {bbs_index!r}")
+            )
+        refused = check_command(league_config, game_type.upper())
+        if refused:
+            self.errors.append(ValidationError("Config", f"{league_key}: {refused}"))
+
     def validate(self) -> bool:
         """
         Run all validations.
@@ -266,6 +334,14 @@ class ClientValidator:
             self.errors.append(ValidationError("Config", "Missing [bbs] section"))
             return False
 
+        self.validate_hub()
+
+        sent_action = self.config.get("sync", {}).get("sent_action", "delete")
+        if sent_action not in SENT_ACTIONS:
+            self.errors.append(
+                ValidationError("Config", f"sync.sent_action must be 'delete' or 'archive', got '{sent_action}'")
+            )
+
         # Validate each enabled league
         leagues = self.config.get("leagues", {})
         enabled_count = 0
@@ -277,6 +353,7 @@ class ClientValidator:
 
                 enabled_count += 1
                 league_key = f"{game_type}.{league_id}"
+                self.validate_league(game_type, league_id, league_config)
 
                 # Validate directories
                 game_folder = league_config.get("game_folder")
@@ -347,3 +424,24 @@ class ClientValidator:
 
         print("=" * 70)
         print()
+
+
+def main() -> int:
+    import argparse
+
+    from dotenv import load_dotenv
+
+    parser = argparse.ArgumentParser(description="Nova Hub Client - Configuration validation")
+    parser.add_argument("--config", default="config.toml", help="Path to configuration file (default: config.toml)")
+    args = parser.parse_args()
+
+    # client.py reads the credentials from .env too
+    load_dotenv()
+    validator = ClientValidator(args.config)
+    success = validator.validate()
+    validator.print_results()
+    return 0 if success else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

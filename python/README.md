@@ -63,11 +63,15 @@ Credentials can also be set via environment variables:
 [sync]
 sent_action = "archive"       # "archive" or "delete"
 archive_dir = "./sent"        # Where to move sent packets
-max_retries = 3
-retry_delay = 5
+max_retries = 3               # Attempts per request, for a dropped connection,
+                              # 408, 429 or 5xx; others fail at once
+retry_delay = 5               # Seconds between them, unless the hub sends Retry-After
 timeout_seconds = 120         # Per-request HTTP timeout
 metrics_file = "./metrics.json"
 ```
+
+A downloaded packet is written to `<name>.part` and renamed once complete, so the game
+never reads half a packet. Anything over 10 MB is refused.
 
 ### League Configuration
 
@@ -135,9 +139,15 @@ python daemon.py --config config.toml --verbose
 ```
 
 The daemon:
-1. Syncs with Nova Hub at `sync_interval`
+1. Syncs with Nova Hub at `sync_interval`, keeping one token until it expires
 2. Runs game maintenance at `maintenance_interval`
-3. Triggers immediate maintenance when packets are downloaded (if enabled)
+3. Triggers immediate maintenance when packets are downloaded (if enabled), then
+   uploads the replies it wrote
+4. With `enabled = false` it starts, syncs nothing, and waits to be stopped
+
+The daemon and `client.py` take a lock beside the config (`config.toml.lock`), so only one
+of them syncs that config at a time. A `client.py` run while the daemon is mid-cycle says so
+and exits 1; the daemon waits for a hand-run `client.py` to finish.
 
 ### Configuration Validation
 
@@ -149,10 +159,16 @@ python validator.py --config myconfig.toml
 ```
 
 Checks:
+- `[hub]` has a URL, and a client ID and secret (or `HUB_CLIENT_ID` / `HUB_CLIENT_SECRET`)
+- `sync.sent_action` is `delete` or `archive`
 - Directory paths exist and are accessible
 - No duplicate directories across leagues
-- nodes.dat files are parseable (if present)
+- nodes.dat files are parseable. A missing one warns: a new node has none until it has
+  processed the hub's first nodelist
+- Every node is behind a `HOST` line (a warning if one would be sent to directly)
 - BBS index consistency
+- `game_command`, `maintenance_args` and `game_dos_path` hold nothing the command shell
+  would act on (`& | < > ^ % "` or a line break). The daemon refuses to run one that does.
 
 A BBS with no leagues yet passes, with a warning: it can sign in, it just has nothing to sync.
 
