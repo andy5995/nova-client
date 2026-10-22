@@ -224,9 +224,21 @@ After each sync, `metrics.json` contains:
       "downloaded": 2,
       "errors": 0
     }
-  }
+  },
+  "unprocessed": {
+    "BRE_555": ["555B0102.001"]
+  },
+  "total_unprocessed": 1
 }
 ```
+
+`unprocessed` lists the packets and nodelists still in each league's inbound after the
+daemon's last maintenance run. The game should have taken those in, so a name here means it
+skipped them. The daemon also logs a WARNING naming them after each maintenance. Two common
+causes are an inbound path the game can't see (BRE ignores one with a directory name longer
+than 8.3) and a packet the game won't read. A one-shot `client.py`, or the daemon before its
+first maintenance, runs none, so these two fields are left out. The PowerShell client writes
+the same fields.
 
 ## Testing
 
