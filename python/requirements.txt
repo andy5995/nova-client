@@ -2,7 +2,7 @@
 #    uv export --frozen --no-dev --no-emit-project --no-hashes -o python/requirements.txt
 aiohappyeyeballs==2.6.1
     # via aiohttp
-aiohttp==3.10.0
+aiohttp==3.14.3
     # via nova-client
 aiosignal==1.4.0
     # via aiohttp
@@ -19,12 +19,16 @@ multidict==6.7.0
     #   aiohttp
     #   yarl
 propcache==0.4.1
-    # via yarl
+    # via
+    #   aiohttp
+    #   yarl
 python-dotenv==1.0.1
     # via nova-client
 toml==0.10.2
     # via nova-client
 typing-extensions==4.15.0 ; python_full_version < '3.13'
-    # via aiosignal
+    # via
+    #   aiohttp
+    #   aiosignal
 yarl==1.22.0
     # via aiohttp
