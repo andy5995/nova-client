@@ -84,6 +84,10 @@ Python-only release, which is the code that had been running in production.
   the error stopped the systemd unit starting, so it never fetched one.
 - An unknown `sync.sent_action` is refused at start. It used to leave every packet in
   outbound, to be sent again each sync.
+- **aiohttp 3.10.0 → 3.14.3**, the version the hub runs. 3.10.0 has no wheels for Python
+  3.13 or later, so pip there tried to build it from source and failed without a compiler.
+  It also picks up the aiohttp security fixes since 3.10.0. A pip install gets it from
+  `python/requirements.txt`; `uv sync --no-dev` from `uv.lock`. (#27)
 
 ### Changed
 
