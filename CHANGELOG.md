@@ -96,6 +96,12 @@ Python-only release, which is the code that had been running in production.
 
 ### Added
 
+- **What maintenance left in inbound is reported** (both clients, #15). After each maintenance
+  run the daemon lists any packet or nodelist still in a league's inbound, which the game
+  should have taken in, as a WARNING naming the files. It also writes them to metrics.json as
+  `unprocessed` (by league) and `total_unprocessed`. A game that can't see its inbound folder,
+  or won't read a packet, used to show nothing at all. A `-Once` / one-shot sync runs no
+  maintenance and leaves both fields out.
 - **Connection test**: `client.py --test-connection` and `-TestConnection`. Signs in to the
   hub, says "Authenticated Successfully" or why not (unreachable, wrong ID or secret, rate
   limited), then compares each league and BBS index in the config with what the hub has for

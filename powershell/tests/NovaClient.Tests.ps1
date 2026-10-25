@@ -510,6 +510,8 @@ Describe 'Nova Client <_.Name>' -ForEach $Targets {
             $m.PSObject.Properties.Name | Should -Contain 'success'
             $m.PSObject.Properties.Name | Should -Contain 'errors'
             $m.PSObject.Properties.Name | Should -Contain 'leagues'
+            # -Once runs no maintenance, so it cannot say what the game skipped
+            $m.PSObject.Properties.Name | Should -Not -Contain 'total_unprocessed'
         }
 
         It 'uploads an outbound packet and archives it' {
@@ -790,6 +792,35 @@ Describe 'Nova Client <_.Name>' -ForEach $Targets {
                 Stop-Job $job -ErrorAction SilentlyContinue
                 Remove-Job $job -Force -ErrorAction SilentlyContinue
             }
+        }
+
+        It 'names a packet maintenance left in inbound, and counts it in metrics.json' {
+            # As above, maintenance cannot run the game here, so the packet the
+            # sync downloaded is still in inbound when it finishes (#15).
+            (Get-Content $Script:Ws.Config -Raw).Replace(
+                'RunMaintenanceOnDownload   = $false', 'RunMaintenanceOnDownload   = $true') |
+                Set-Content $Script:Ws.Config
+            Set-Content -LiteralPath (Join-Path $Script:Ws.Inbound 'readme.txt') -Value 'not a packet'
+            $jobShell = $_.Shell
+            $jobScript = $_.Script
+            $jobConfig = $Script:Ws.Config
+            $job = Start-Job -ScriptBlock {
+                & $using:jobShell -NoProfile -ExecutionPolicy Bypass `
+                    -File $using:jobScript -Config $using:jobConfig -Daemon
+            }
+            try {
+                Start-Sleep -Seconds 8
+                $output = (Receive-Job $job) | Out-String
+            }
+            finally {
+                Stop-Job $job -ErrorAction SilentlyContinue
+                Remove-Job $job -Force -ErrorAction SilentlyContinue
+            }
+            $output | Should -Match '\[WARN\] BRE_555: 1 file\(s\) still in inbound after maintenance: 555B0102\.007'
+            # The upload pass straight after maintenance writes it out
+            $m = Get-Content $Script:Ws.Metrics -Raw | ConvertFrom-Json
+            $m.total_unprocessed | Should -Be 1
+            @($m.unprocessed.BRE_555) | Should -Be @('555B0102.007')
         }
 
         It 'exits 2 when the config file does not exist' {
