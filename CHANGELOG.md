@@ -7,6 +7,40 @@ Python-only release, which is the code that had been running in production.
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-10-26
+
+The review release. Downloads survive a 502 or a full disk, a daemon keeps one token and
+shares nothing with a hand-run client, a hung game is killed whole, and the PowerShell
+client's first nodelist reaches the game. Both daemons now say when a game leaves packets
+unprocessed in inbound.
+
+### Upgrading
+
+**Python dependencies come from the lock.** aiohttp moves to 3.14.3. Python itself doesn't
+change: 3.12 or later, as before. From the repo root, with the daemon stopped:
+
+```bash
+mv .venv .venv-0.3.0                # keep it for a rollback
+uv sync --no-dev --frozen           # or: pip install -r python/requirements.txt
+cd python && ../.venv/bin/python daemon.py --validate --config config.toml
+```
+
+Keep the old venv until the new one has run for a while. To go back, put it back. Rebuilding
+0.3.0's from its `requirements.txt` asks for aiohttp 3.10.0, which has no wheels for Python
+3.13 and fails to build without a compiler.
+
+Validate before restarting. An unknown `sync.sent_action` and a malformed `bbs_index` are now
+refused at start, and a game command containing a character the shell would act on is not run.
+
+Stop the daemon between maintenance runs. Its stop timeout is shorter than a PLANETARY run.
+
+The daemon now keeps a lock file beside its config (`config.toml.lock`), so the account it runs
+as must be able to write that folder. An installed systemd unit needs no change; the one in
+`linux/` assumes `/opt/nova-client` and a `nova` user, so don't copy it over a working one.
+
+**PowerShell:** pull and restart. Re-running `Install-NovaClientTask.ps1` is optional; it now
+warns if ordinary users can change what the SYSTEM task runs.
+
 ### Fixed (PowerShell client)
 
 - **The bootstrap nodelist went where the game never looked.** A node with no nodelist fetched
