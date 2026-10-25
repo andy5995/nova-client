@@ -26,12 +26,12 @@ import sys
 import traceback
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import toml
 
 from _version import __version__
-from client import NovaHubClient
+from client import NovaHubClient, unprocessed_packets
 from instance_lock import InstanceLock
 from game_runner import GameRunner, GameRunResult
 
@@ -64,6 +64,10 @@ class NovaDaemon:
         # One token for every sync until it expires or the hub refuses it,
         # rather than a fresh one each cycle (#20)
         self._token_cache: Dict[str, Any] = {}
+
+        # What the last maintenance of each league left in its inbound (#15).
+        # None until one has run: until then there is nothing to judge by.
+        self._unprocessed: Optional[Dict[str, List[str]]] = None
 
         # Shared with client.py run by hand: see instance_lock.py
         self._lock = InstanceLock(config_path)
@@ -240,7 +244,8 @@ class NovaDaemon:
 
     def _client(self) -> NovaHubClient:
         # A new client each cycle, so edits to the config take effect
-        return NovaHubClient(self.config_path, verbose=self.verbose, token_cache=self._token_cache)
+        return NovaHubClient(self.config_path, verbose=self.verbose,
+                             token_cache=self._token_cache, unprocessed=self._unprocessed)
 
     async def _sync_locked(self):
         self.log("INFO", "=" * 50)
@@ -347,11 +352,33 @@ class NovaDaemon:
                     )
                     self.stats["errors"] += 1
 
+            self._check_inbound(results)
+
         except Exception as e:
             self.log("ERROR", f"Maintenance failed: {e}")
             self.stats["errors"] += 1
             if self.verbose:
                 traceback.print_exc()
+
+    def _check_inbound(self, results: Dict[str, GameRunResult]):
+        """Warn about, and record for metrics.json, any packet maintenance left
+        in inbound. Only leagues that ran are judged; nothing downloads while
+        maintenance holds the lock, so everything there was there before it."""
+        unprocessed: Dict[str, List[str]] = {}
+        for game_type, leagues in self.config.get("leagues", {}).items():
+            for league_id, league_config in leagues.items():
+                league_key = f"{game_type}_{league_id}"
+                if league_key not in results or not league_config.get("inbound_dir"):
+                    continue
+                names = unprocessed_packets(league_config["inbound_dir"])
+                unprocessed[league_key] = names
+                if names:
+                    self.log(
+                        "WARNING",
+                        f"  {league_key}: {len(names)} file(s) still in inbound after "
+                        f"maintenance: {', '.join(names)}"
+                    )
+        self._unprocessed = unprocessed
 
     def _setup_signal_handlers(self):
         """Setup handlers for graceful shutdown"""

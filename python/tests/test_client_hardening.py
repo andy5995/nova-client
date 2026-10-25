@@ -8,6 +8,7 @@ runnable as the README says, and agree with what client.py will refuse.
 """
 
 import asyncio
+import json
 import os
 import subprocess
 import sys
@@ -24,7 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import client as client_module  # noqa: E402
 import daemon as daemon_module  # noqa: E402
 from client import NovaHubClient  # noqa: E402
-from game_runner import GameRunner  # noqa: E402
+from game_runner import GameRunner, GameRunResult  # noqa: E402
 from instance_lock import InstanceLock  # noqa: E402
 from validator import ClientValidator  # noqa: E402
 
@@ -283,6 +284,61 @@ async def test_replies_written_by_maintenance_go_out_at_once(hub, tmp_path, monk
     assert not reply.exists()
     assert daemon.stats["packets_uploaded"] == 1
     assert hub.tokens_issued == 1
+
+
+# -- what maintenance leaves in inbound (#15) -----------------------------------------
+
+def _maintenance_that(takes_in, inbound):
+    async def maintenance(timeout_per_league):
+        if takes_in:
+            for p in inbound.iterdir():
+                if p.name.upper() == PACKET:
+                    p.unlink()
+        return {"BRE_555": GameRunResult(success=True, game_type="BRE", league_id="555",
+                                         command="BRE")}
+    return maintenance
+
+
+@pytest.mark.asyncio
+async def test_a_packet_maintenance_left_in_inbound_is_named_and_counted(
+        hub, tmp_path, monkeypatch, capsys):
+    config = _config(tmp_path, hub.url, "\n[daemon]\n")
+    inbound = tmp_path / "inbound"
+    (inbound / "README.TXT").write_text("not a packet")
+    daemon = daemon_module.NovaDaemon(config)
+    monkeypatch.setattr(daemon.game_runner, "run_all_maintenance",
+                        _maintenance_that(False, inbound))
+    await daemon._run_sync()
+
+    assert f"BRE_555: 1 file(s) still in inbound after maintenance: {PACKET}" in capsys.readouterr().out
+    # The upload pass straight after maintenance writes it out
+    metrics = json.loads((tmp_path / "metrics.json").read_text())
+    assert metrics["unprocessed"] == {"BRE_555": [PACKET]}
+    assert metrics["total_unprocessed"] == 1
+
+
+@pytest.mark.asyncio
+async def test_an_inbound_the_game_emptied_reports_nothing(hub, tmp_path, monkeypatch, capsys):
+    config = _config(tmp_path, hub.url, "\n[daemon]\n")
+    daemon = daemon_module.NovaDaemon(config)
+    monkeypatch.setattr(daemon.game_runner, "run_all_maintenance",
+                        _maintenance_that(True, tmp_path / "inbound"))
+    await daemon._run_sync()
+
+    assert "still in inbound" not in capsys.readouterr().out
+    metrics = json.loads((tmp_path / "metrics.json").read_text())
+    assert metrics["unprocessed"] == {"BRE_555": []}
+    assert metrics["total_unprocessed"] == 0
+
+
+@pytest.mark.asyncio
+async def test_a_one_shot_sync_makes_no_claim_about_inbound(hub, tmp_path):
+    # No maintenance ran, so a packet just downloaded is not "unprocessed"
+    client = NovaHubClient(_config(tmp_path, hub.url))
+    await client.run()
+    metrics = json.loads((tmp_path / "metrics.json").read_text())
+    assert metrics["total_downloaded"] == 1
+    assert "unprocessed" not in metrics and "total_unprocessed" not in metrics
 
 
 # -- game commands -----------------------------------------------------------------

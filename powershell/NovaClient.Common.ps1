@@ -1017,6 +1017,12 @@ function Complete-NovaRun {
 
     $Script:Metrics.end_time = (Get-Date).ToString('o')
     $Script:Metrics.success = ($Script:Metrics.errors.Count -eq 0)
+    if ($null -ne $Script:Unprocessed) {
+        $total = 0
+        foreach ($names in $Script:Unprocessed.Values) { $total += @($names).Count }
+        $Script:Metrics.unprocessed = $Script:Unprocessed
+        $Script:Metrics.total_unprocessed = $total
+    }
 
     $metricsFile = Get-NovaSetting $Cfg 'Sync.MetricsFile' 'metrics.json'
     try {
@@ -1107,21 +1113,57 @@ function Invoke-NovaGameMaintenance {
     return $false
 }
 
+# What the last maintenance of each league left in its inbound (#15), for
+# metrics.json. $null until maintenance has run: a -Once sync runs none, and
+# a packet it has just downloaded is not "unprocessed", so the keys are left
+# out rather than written as 0.
+$Script:Unprocessed = $null
+
+function Get-NovaUnprocessedPacket {
+    <#
+        Packets and nodelists in inbound, by name. Straight after maintenance
+        the game should have taken in everything here, so whatever is left it
+        skipped: a game that cannot see its inbound folder (a non-8.3 path,
+        say), or a packet it will not read.
+    #>
+    param([string] $InboundDir)
+
+    if (-not $InboundDir -or -not (Test-Path -LiteralPath $InboundDir -PathType Container)) {
+        return @()
+    }
+    return @(Get-ChildItem -LiteralPath $InboundDir -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match $Script:PacketPattern -or $_.Name -match $Script:NodelistPattern } |
+            ForEach-Object { $_.Name } | Sort-Object)
+}
+
 function Invoke-NovaAllMaintenance {
     <#
         Returns Ran and Failed counts. Failures used to go uncounted, so a
         daemon whose game never ran still reported no errors.
+
+        Afterwards, warns about anything left in each league's inbound. Only
+        leagues that ran are judged, and nothing downloads during maintenance,
+        so everything there was there before it.
     #>
     param([hashtable] $Cfg)
 
     $timeout = [int](Get-NovaSetting $Cfg 'Daemon.MaintenanceTimeoutSeconds' 300)
     $ran = 0
     $failed = 0
+    $unprocessed = [ordered]@{}
     foreach ($league in (Get-NovaLeagues -Cfg $Cfg)) {
         if (-not $league.GameFolder) { continue }
         if (Invoke-NovaGameMaintenance -League $league -TimeoutSeconds $timeout) { $ran++ }
         else { $failed++ }
+
+        $names = @(Get-NovaUnprocessedPacket -InboundDir $league.InboundDir)
+        $unprocessed[$league.Key] = $names
+        if ($names.Count -gt 0) {
+            Write-NovaLog WARN ("{0}: {1} file(s) still in inbound after maintenance: {2}" -f
+                $league.Key, $names.Count, ($names -join ', '))
+        }
     }
+    $Script:Unprocessed = $unprocessed
     return [pscustomobject]@{ Ran = $ran; Failed = $failed }
 }
 

@@ -54,6 +54,20 @@ def hub_league_id(game_type: str, league_number: str) -> str:
     return f"{league_number}{letter}"
 
 
+def unprocessed_packets(inbound_dir) -> List[str]:
+    """Packets and nodelists in inbound, by name.
+
+    Straight after maintenance the game should have taken in everything here,
+    so whatever is left it skipped: a game that cannot see its inbound folder
+    (a non-8.3 path, say), or a packet it will not read (#15).
+    """
+    try:
+        names = [p.name for p in Path(inbound_dir).iterdir() if p.is_file()]
+    except OSError:
+        return []
+    return sorted(n for n in names if PACKET_NAME.fullmatch(n) or NODELIST_NAME.fullmatch(n))
+
+
 class ResponseTooLarge(Exception):
     pass
 
@@ -66,6 +80,7 @@ class NovaHubClient:
         config_path: str = "config.toml",
         verbose: bool = False,
         token_cache: Optional[dict] = None,
+        unprocessed: Optional[Dict[str, List[str]]] = None,
     ):
         self.verbose = verbose
         self.config_path = config_path
@@ -73,6 +88,10 @@ class NovaHubClient:
         # The daemon passes the same dict every cycle, so one token lasts
         # until it expires or the hub refuses it.
         self.token_cache = token_cache if token_cache is not None else {}
+        # What the daemon's last maintenance left in each league's inbound,
+        # for metrics.json. None from a one-shot run, which has no maintenance
+        # to judge by, so the keys are left out rather than written as 0.
+        self.unprocessed = unprocessed
         self.upload_only = False
         self.metrics: Dict[str, Any] = {
             "start_time": datetime.now().isoformat(),
@@ -811,6 +830,9 @@ class NovaHubClient:
         """Finalize the run and output metrics"""
         self.metrics["end_time"] = datetime.now().isoformat()
         self.metrics["success"] = len(self.metrics["errors"]) == 0
+        if self.unprocessed is not None:
+            self.metrics["unprocessed"] = dict(self.unprocessed)
+            self.metrics["total_unprocessed"] = sum(len(v) for v in self.unprocessed.values())
 
         # Output metrics as JSON
         metrics_file = Path(
