@@ -18,7 +18,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import toml
 
 from client import GAME_LETTERS, SENT_ACTIONS
-from game_runner import check_command
+from game_runner import GameRunner, check_command
 from nodes_parser import NodesFileParser
 
 
@@ -341,6 +341,16 @@ class ClientValidator:
             self.errors.append(
                 ValidationError("Config", f"sync.sent_action must be 'delete' or 'archive', got '{sent_action}'")
             )
+
+        drives = self.config.get("daemon", {}).get("dosemu_drives") or {}
+        try:
+            for letter, path in GameRunner._dosemu_drives(drives).items():
+                if not Path(path).is_dir():
+                    self.errors.append(
+                        ValidationError("Config", f"daemon.dosemu_drives: {letter}: {path} does not exist")
+                    )
+        except ValueError as e:
+            self.errors.append(ValidationError("Config", f"daemon.{e}"))
 
         # Validate each enabled league
         leagues = self.config.get("leagues", {})

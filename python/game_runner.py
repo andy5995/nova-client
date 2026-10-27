@@ -380,13 +380,15 @@ class GameRunner:
         config_dir = Path(dosemu_config_dir).resolve()
         config_dir.mkdir(parents=True, exist_ok=True)
 
+        drives = self._dosemu_drives(daemon_config.get("dosemu_drives") or {})
+
         # Generate dosemu config
         conf_file = config_dir / f"{game_type.lower()}_{league_id}.conf"
-        self._write_dosemu_config(conf_file)
+        self._write_dosemu_config(conf_file, drives)
 
         # Create batch file to run the command
         batch_file = game_folder / "NOVAMNT.BAT"
-        self._create_batch_file(batch_file, full_command, game_dos_path)
+        self._create_batch_file(batch_file, full_command, game_dos_path, drives)
 
         # Prepare log file for output capture
         log_dir = Path(daemon_config.get("log_dir", "./logs")).resolve()
@@ -558,7 +560,26 @@ class GameRunner:
 
         return " - ".join(parts)
 
-    def _write_dosemu_config(self, conf_file: Path):
+    @staticmethod
+    def _dosemu_drives(drives: dict) -> Dict[str, str]:
+        """[daemon] dosemu_drives, checked: {"M": "/opt/eqx/bbs"} -> {"M": ...}.
+
+        For games installed where the BBS sees them through a redirected
+        drive (an M: that lredir maps to a host directory) rather than under
+        drive_c: their own config files hold those drive paths, so the
+        maintenance run needs the same drive, not just a CD into the folder.
+        """
+        checked = {}
+        for letter, path in drives.items():
+            letter = str(letter).rstrip(":").upper()
+            if len(letter) != 1 or not letter.isalpha() or letter == "C":
+                raise ValueError(f"dosemu_drives: {letter!r} is not a drive letter other than C")
+            if not Path(path).is_absolute():
+                raise ValueError(f"dosemu_drives: {letter}: must be an absolute host path, not {path!r}")
+            checked[letter] = str(path)
+        return checked
+
+    def _write_dosemu_config(self, conf_file: Path, drives: Optional[Dict[str, str]] = None):
         """Write dosemu configuration file"""
         conf_content = """# Nova Client dosemu configuration
 $_layout = "us"
@@ -572,9 +593,15 @@ $_com1 = ""
 $_com2 = ""
 $_quiet = (1)
 """
+        if drives:
+            # dosemu2 lets lredir map only the host paths listed here
+            conf_content += f'$_lredir_paths = "{" ".join(drives.values())}"\n'
         conf_file.write_text(conf_content)
 
-    def _create_batch_file(self, batch_file: Path, command: str, game_dos_path: str):
+    def _create_batch_file(
+        self, batch_file: Path, command: str, game_dos_path: str,
+        drives: Optional[Dict[str, str]] = None,
+    ):
         """Create DOS batch file to run the game command"""
         # Extract drive letter if present
         drive_letter = ""
@@ -583,6 +610,8 @@ $_quiet = (1)
 
         batch_content = "@ECHO OFF\n"
         batch_content += "ECHO Nova Client Maintenance Starting\n"
+        for letter, path in (drives or {}).items():
+            batch_content += f"lredir -f {letter}: {path}\n"
 
         if drive_letter:
             batch_content += f"{drive_letter}\n"
