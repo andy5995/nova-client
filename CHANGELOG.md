@@ -7,6 +7,12 @@ Python-only release, which is the code that had been running in production.
 
 ## [Unreleased]
 
+### Added
+
+- Immortal Barons leagues (`[leagues.IB.<n>]`, `Game = 'IB'`): its packet names, a native
+  runner on Linux, and its roster, `IBNODES.<league>`, installed as `ibnodes.dat` only when the
+  game has none.
+
 ## [0.5.0] — 2026-10-28
 
 Linux nodes whose BBS runs its games from a redirected DOS drive can now run maintenance.

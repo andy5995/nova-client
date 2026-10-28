@@ -14,7 +14,7 @@ installed on the machine.
 | **Runs on** | Linux, Windows | Windows |
 | **Needs** | Python 3.12+, `pip install -r requirements.txt` | nothing — Windows PowerShell 5.1 ships with Windows |
 | **Config file** | `config.toml` | `config.psd1` |
-| **Runs the game via** | native `.EXE` on Windows, dosemu on Linux | native `.EXE` |
+| **Runs the game via** | native `.EXE` on Windows, dosemu on Linux (Immortal Barons runs natively) | native `.EXE` |
 | **Runs unattended as** | systemd service ([`linux/`](linux/)) | Scheduled Task (`Install-NovaClientTask.ps1`) |
 
 Both implementations:
@@ -23,8 +23,8 @@ Both implementations:
 - upload the packets your game has written for other BBSes,
 - download the packets addressed to you,
 - keep your league nodelist up to date,
-- and (in daemon mode) run `BRE PLANETARY` / `FE PLANETARY` on a schedule or as soon as
-  packets arrive.
+- and (in daemon mode) run `BRE PLANETARY` / `FE PLANETARY` /
+  `immortal-barons -maint -data .` on a schedule or as soon as packets arrive.
 
 ## Getting started
 
@@ -84,8 +84,10 @@ The hub checks that the **source** index matches the client uploading it, and th
 rejected with a `403` — that is far and away the most common setup problem, and both clients'
 `-Validate` / `--validate` modes check for it before you hit the network.
 
-Nodelists are `BRNODES.<league>` / `FENODES.<league>`. The hub generates them; clients only
-ever download them.
+Nodelists are `BRNODES.<league>` / `FENODES.<league>` / `IBNODES.<league>`. The hub generates
+them; clients only ever download them. Immortal Barons keeps its own roster, `ibnodes.dat`, up to
+date from its league's signed broadcasts, so a client installs `IBNODES.<league>` there only when
+the game has no roster yet.
 
 ## Repository layout
 

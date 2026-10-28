@@ -87,7 +87,7 @@
     Leagues = @(
 
         @{
-            Game    = 'BRE'      # 'BRE' (Barren Realms Elite) or 'FE' (Falcon's Eye)
+            Game    = 'BRE'      # 'BRE' (Barren Realms Elite), 'FE' (Falcon's Eye) or 'IB' (Immortal Barons)
             Number  = '015'      # exactly 3 digits, as issued by the hub
             Enabled = $true
 
@@ -120,6 +120,21 @@
         #     GameFolder      = 'C:\BBS\DOORS\FE_015'
         #     GameCommand     = 'FE'
         #     MaintenanceArgs = 'PLANETARY'
+        # }
+
+        # Immortal Barons. GameFolder is its data directory (-data), where it
+        # keeps ibnodes.dat; the directories are GameInbound and GameOutbound
+        # in its bbs.cfg.
+        # @{
+        #     Game    = 'IB'
+        #     Number  = '777'
+        #     Enabled = $true
+        #     BbsIndex = 4
+        #     OutboundDir = 'C:\BBS\DOORS\IB_777\outbound'
+        #     InboundDir  = 'C:\BBS\DOORS\IB_777\inbound'
+        #     GameFolder      = 'C:\BBS\DOORS\IB_777'
+        #     GameCommand     = 'C:\BBS\DOORS\immortal-barons.exe'
+        #     MaintenanceArgs = '-maint -data C:\BBS\DOORS\IB_777'
         # }
     )
 }

@@ -691,6 +691,79 @@ Describe 'Nova Client <_.Name>' -ForEach $Targets {
         }
     }
 
+    Context 'an Immortal Barons league' {
+        BeforeEach {
+            # BBS 10 in league 555I; the game keeps ibnodes.dat, so there is
+            # no brnodes.dat, and IB's own packet names
+            (Get-Content -LiteralPath $Script:Ws.Config -Raw).
+                Replace("Game        = 'BRE'", "Game        = 'IB'").
+                Replace('BbsIndex    = 2', 'BbsIndex    = 10').
+                Replace("'test_client'", "'ib_client'").Replace("'test_secret'", "'ib_secret'") |
+                Set-Content -LiteralPath $Script:Ws.Config
+            Remove-Item -LiteralPath (Join-Path $Script:Ws.Game 'BRNODES.DAT')
+            $Script:Roster = Join-Path $Script:Ws.Game 'ibnodes.dat'
+        }
+
+        It 'uploads its own packets and says why it leaves one without node numbers' {
+            $ours = Join-Path $Script:Ws.Outbound 'L555-a-0000000000001-0.brp'
+            $noRoster = Join-Path $Script:Ws.Outbound 'L555-ABCDEFGHIJKLMNOP.brp'
+            $theirs = Join-Path $Script:Ws.Outbound 'L555-b-0000000000001-1.brp'
+            foreach ($file in @($ours, $noRoster, $theirs)) { [IO.File]::WriteAllBytes($file, [byte[]](1..8)) }
+
+            $r = Invoke-Client -Target $_ -ConfigPath $Script:Ws.Config -ClientArgs @('-Once')
+            $r.Output | Should -Match 'Uploaded L555-a-0000000000001-0\.brp'
+            $r.Output | Should -Match 'no ibnodes\.dat yet'
+            Test-Path $ours | Should -BeFalse
+            Test-Path $noRoster | Should -BeTrue
+            Test-Path $theirs | Should -BeTrue
+        }
+
+        It 'downloads a broadcast and installs the first roster as ibnodes.dat' {
+            $r = Invoke-Client -Target $_ -ConfigPath $Script:Ws.Config -ClientArgs @('-Once')
+            $r.ExitCode | Should -Be 0
+            Test-Path (Join-Path $Script:Ws.Inbound 'L555-1-0000000000001-0.BRP') | Should -BeTrue
+            Test-Path $Script:Roster | Should -BeTrue
+            (Get-Content -LiteralPath $Script:Roster)[1] | Should -Be 'Nova Hub'
+            # The game reads neither inbound nor the game folder for IBNODES.555
+            Test-Path (Join-Path $Script:Ws.Inbound 'IBNODES.555') | Should -BeFalse
+            Test-Path (Join-Path $Script:Ws.Game 'IBNODES.555') | Should -BeFalse
+        }
+
+        It 'leaves the roster the game keeps as it is' {
+            # The one the game keeps, from the Coordinator's signed broadcasts
+            $kept = @('1', 'Kept Hub', '-', '-', '-', '-', '', '10', 'Test BBS', '-', '-', '-', '-', '')
+            $kept | Set-Content -LiteralPath $Script:Roster
+            $r = Invoke-Client -Target $_ -ConfigPath $Script:Ws.Config -ClientArgs @('-Once', '-Verbose')
+            $r.ExitCode | Should -Be 0
+            $r.Output | Should -Match 'left it as it is'
+            (Get-Content -LiteralPath $Script:Roster)[1] | Should -Be 'Kept Hub'
+            $r.Output | Should -Not -Match 'leagues/555I/nodelist'
+            Test-Path (Join-Path $Script:Ws.Game 'IBNODES.555') | Should -BeFalse
+        }
+
+        It 'validates an ibnodes.dat whose entries carry keys, with no HOST lines' {
+            $key = 'ab' * 32
+            @(
+                '1', 'Nova Hub', '-', '-', '-', '-', $key, ''
+                '10', 'Test BBS', '-', 'City', 'ST', 'USA', $key, ''
+            ) | Set-Content -LiteralPath $Script:Roster
+            $r = Invoke-Client -Target $_ -ConfigPath $Script:Ws.Config -ClientArgs @('-Validate')
+            $r.ExitCode | Should -Be 0
+            $r.Output | Should -Match 'Configuration is valid'
+            $r.Output | Should -Not -Match 'HOST'
+        }
+
+        It 'rejects a UNC GameFolder, which cmd.exe cannot run it from' {
+            # cmd.exe drops to the Windows directory, so -data . would be wrong
+            (Get-Content $Script:Ws.Config -Raw) -replace
+                "GameFolder  = '[^']*'", "GameFolder  = '\\\\fileserver\\bbs\\IB_555'" |
+                Set-Content $Script:Ws.Config
+            $r = Invoke-Client -Target $_ -ConfigPath $Script:Ws.Config -ClientArgs @('-Validate')
+            $r.ExitCode | Should -Be 2
+            $r.Output | Should -Match 'must not be a UNC path'
+        }
+    }
+
     Context 'safety' {
         It 'refuses to start a second instance against the same config' {
             # Hoist out of $_ before the Start-Job: $_ does not survive into a
