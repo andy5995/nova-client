@@ -32,6 +32,13 @@ dosemu_config_dir = "./dosemu_configs"
 # TERM=dumb and dosemu exits immediately leaving a ~330-byte log. Leave this
 # alone unless you have a reason.
 dosemu_term = "linux"
+
+# Linux-only: extra DOS drives for maintenance runs, mapped with lredir.
+# Needed when the BBS reaches the games through a drive other than C: (an
+# M: redirected to the BBS tree, say): BRE/FE keep the drive paths they
+# were set up with in their own config files, so a maintenance run needs
+# the same drive. game_dos_path can then use it ("M:\\DOORS\\BRE_015").
+# dosemu_drives = { M = "/opt/bbs" }
 log_dir = "./logs"
 
 # Define your leagues here

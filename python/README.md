@@ -110,7 +110,15 @@ run_maintenance_on_download = true
 dosemu_path = "/usr/bin/dosemu"
 dosemu_config_dir = "./dosemu_configs"
 log_dir = "./logs"
+# Optional: DOS drives the games were set up on, mapped with lredir
+# dosemu_drives = { M = "/opt/bbs" }
 ```
+
+If the BBS runs its games from a redirected drive (for example an `M:` that
+lredir maps to the BBS tree) rather than from `drive_c`, list it in
+`dosemu_drives`. BRE and FE store the drive paths they were set up with in
+their own config files, so maintenance has to see the same drive; set
+`game_dos_path` on that drive too.
 
 ## Usage
 

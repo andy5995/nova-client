@@ -111,6 +111,8 @@ class NovaDaemon:
         # supplies when the daemon runs as a service. See game_runner.py.
         daemon.setdefault("dosemu_term", "linux")
         daemon.setdefault("log_dir", "./logs")
+        # Drive letter -> host directory, mapped with lredir for maintenance
+        daemon.setdefault("dosemu_drives", {})
 
         return config
 

@@ -7,6 +7,13 @@ Python-only release, which is the code that had been running in production.
 
 ## [Unreleased]
 
+### Added
+
+- `[daemon] dosemu_drives` (Linux): DOS drives mapped with lredir for maintenance runs, for
+  games set up on a redirected drive such as an `M:` holding the BBS tree. Their config files
+  keep those drive paths, so PLANETARY run from `drive_c` alone can't find its own files.
+  `--validate` checks the letters and that each directory exists.
+
 ## [0.4.0] — 2026-10-26
 
 The review release. Downloads survive a 502 or a full disk, a daemon keeps one token and
