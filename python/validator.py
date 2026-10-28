@@ -17,8 +17,9 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import toml
 
-from client import GAME_LETTERS, SENT_ACTIONS
-from game_runner import GameRunner, check_command
+from client import SENT_ACTIONS
+from game_runner import GameRunner, RUNNERS, check_command
+from games import GAME_NAMES, game_for
 from nodes_parser import NodesFileParser
 
 
@@ -173,7 +174,11 @@ class ClientValidator:
             return
 
         # Determine expected nodes file name
-        nodes_filename = "brnodes.dat" if game_type.upper() == "BRE" else "fenodes.dat"
+        game = game_for(game_type)
+        if game is None:
+            return  # an unknown game is reported by validate_league
+        nodes_filename = game.nodes_file
+        is_ib = game_type.upper() == "IB"
 
         # Find file case-insensitively
         nodes_file = self.find_file_case_insensitive(game_folder_path, nodes_filename)
@@ -193,7 +198,7 @@ class ClientValidator:
             return
 
         # Parse nodes file
-        parser = NodesFileParser(nodes_file)
+        parser = NodesFileParser(nodes_file, key_line=is_ib)
         if not parser.parse():
             for error in parser.errors:
                 self.errors.append(
@@ -204,7 +209,9 @@ class ClientValidator:
                 )
             return
 
-        self.check_routing(league_key, nodes_filename, parser)
+        # Immortal Barons leaves routing to the hub, so its roster has no HOST lines
+        if not is_ib:
+            self.check_routing(league_key, nodes_filename, parser)
 
         # Check for duplicate indices
         duplicates = parser.check_duplicate_indices()
@@ -302,9 +309,14 @@ class ClientValidator:
     def validate_league(self, game_type: str, league_id: str, league_config: dict) -> None:
         """What client.py would refuse to start with, and commands it would not run"""
         league_key = f"{game_type}.{league_id}"
-        if game_type.upper() not in GAME_LETTERS:
+        if game_for(game_type) is None:
             self.errors.append(
-                ValidationError("Config", f"{league_key}: unknown game '{game_type}' (use BRE or FE)")
+                ValidationError("Config", f"{league_key}: unknown game '{game_type}' (use {GAME_NAMES})")
+            )
+        runner = league_config.get("runner")
+        if runner is not None and runner not in RUNNERS:
+            self.errors.append(
+                ValidationError("Config", f"{league_key}: runner must be {' or '.join(RUNNERS)}, got {runner!r}")
             )
         bbs_index = league_config.get("bbs_index")
         # bool is an int to Python: bbs_index = true would be BBS 1

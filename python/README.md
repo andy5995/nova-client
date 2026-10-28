@@ -198,9 +198,10 @@ does not is only a warning.
 |------|-------------|
 | `client.py` | One-shot sync client with OAuth |
 | `daemon.py` | Continuous operation daemon |
-| `game_runner.py` | Cross-platform BRE/FE execution |
+| `game_runner.py` | Cross-platform game execution (dosemu, or native for Immortal Barons) |
+| `games.py` | The games served, and what differs between them |
 | `validator.py` | Configuration validation |
-| `nodes_parser.py` | BRE/FE nodes.dat file parser |
+| `nodes_parser.py` | Nodes file parser (brnodes.dat, fenodes.dat, ibnodes.dat) |
 | `_version.py` | Version string, shared with the User-Agent header |
 
 ## Packet Format
@@ -213,6 +214,10 @@ Example: `555B0201.001`
 - Source BBS: `02` (hex)
 - Destination BBS: `01` (hex)
 - Sequence: `001` (000-999, wraps)
+
+Immortal Barons names its own: `L<league>-<source>-<seq>-<dest>.brp`, for example
+`L555-a-0000000000001-0.brp`. The board numbers and the 13-digit sequence are base 36,
+and destination `0` is a broadcast to every board.
 
 ## Metrics
 

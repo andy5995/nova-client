@@ -85,3 +85,16 @@ game_folder = "C:\\BBS\\FE"
 game_command = "FE"
 maintenance_args = "PLANETARY"
 game_dos_path = "C:\\BBS\\FE"
+
+# Example Immortal Barons league configuration
+# A native program, run directly rather than under dosemu. game_folder is its
+# data directory (-data), where it keeps ibnodes.dat; inbound_dir and
+# outbound_dir are GameInbound and GameOutbound in its bbs.cfg.
+[leagues.IB.777]
+enabled = true
+bbs_index = 4
+game_folder = "/home/user/immortal-barons/777"
+inbound_dir = "/home/user/immortal-barons/777/inbound"
+outbound_dir = "/home/user/immortal-barons/777/outbound"
+game_command = "/home/user/immortal-barons/immortal-barons"
+maintenance_args = "-maint -data /home/user/immortal-barons/777"

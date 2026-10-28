@@ -11,6 +11,9 @@ Each BBS entry consists of 6 lines followed by a blank line:
 6. Country (string)
 7. Blank line (separator)
 
+Immortal Barons' ibnodes.dat may give an entry a seventh line before the
+blank, the board's packet-signing public key; parse it with key_line=True.
+
 The routing format on line 1 is: "{int} HOST {int} {int}..."
 where the first integer is the BBS index and subsequent integers are routing targets.
 
@@ -35,13 +38,15 @@ class BBSNode:
     country: str
     line_number: int  # Track where this entry started in the file
     routing_targets: List[int] = field(default_factory=list)  # From "N HOST x y z" format
+    public_key: str = ""  # ibnodes.dat's optional seventh line
 
 
 class NodesFileParser:
     """Parser for brnodes.dat/fenodes.dat files"""
 
-    def __init__(self, file_path: Path):
+    def __init__(self, file_path: Path, key_line: bool = False):
         self.file_path = file_path
+        self.key_line = key_line
         self.nodes: List[BBSNode] = []
         self.errors: List[str] = []
 
@@ -144,6 +149,10 @@ class NodesFileParser:
 
             # Move to next entry (skip the 6 lines + blank line separator)
             i += 6
+            if self.key_line and i < len(lines) and lines[i].strip():
+                if self.nodes and self.nodes[-1].line_number == start_line:
+                    self.nodes[-1].public_key = lines[i].strip()
+                i += 1
             # Skip blank lines between entries
             while i < len(lines) and lines[i].strip() == '':
                 i += 1

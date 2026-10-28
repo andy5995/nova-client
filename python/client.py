@@ -16,6 +16,7 @@ import aiohttp
 import toml
 
 from _version import USER_AGENT, __version__
+from games import GAME_NAMES, GAMES, game_for
 from instance_lock import InstanceLock
 
 # Load environment variables
@@ -23,8 +24,6 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# Config sections name the game; the hub's league ids carry its letter.
-GAME_LETTERS = {"BRE": "B", "FE": "F"}
 
 # The hub refuses larger uploads, so a larger download is not a packet.
 MAX_PACKET_SIZE = 10 * 1024 * 1024
@@ -40,18 +39,28 @@ TOKEN_MARGIN = timedelta(seconds=60)
 SENT_ACTIONS = ("delete", "archive")
 
 # fullmatch, not match with $: $ also matches before a trailing newline.
-PACKET_NAME = re.compile(r"[0-9]{3}[BF][0-9A-F]{4}\.[0-9]{3}", re.IGNORECASE)
-NODELIST_NAME = re.compile(r"(BR|FE)NODES\.[0-9]{3}", re.IGNORECASE)
+SR_PACKET_NAME = re.compile(r"[0-9]{3}[BF][0-9A-F]{4}\.[0-9]{3}", re.IGNORECASE)
+# Immortal Barons: L555-<src>-<seq>-<dst>.brp, the nodes (1-255, 0 for a
+# broadcast) and the 13-digit sequence in base 36, as the hub reads them.
+IB_PACKET_NAME = re.compile(
+    r"L(?P<league>[0-9]{3})-(?P<src>[1-9A-Z][0-9A-Z]?)-[0-9A-Z]{13}-(?:0|[1-9A-Z][0-9A-Z]?)\.BRP",
+    re.IGNORECASE,
+)
+NODELIST_NAME = re.compile(r"(BR|FE|IB)NODES\.[0-9]{3}", re.IGNORECASE)
+
+
+def is_packet_name(name: str) -> bool:
+    return bool(SR_PACKET_NAME.fullmatch(name) or IB_PACKET_NAME.fullmatch(name))
 
 
 def hub_league_id(game_type: str, league_number: str) -> str:
     """The hub's id for a config league: [leagues.BRE.555] is "555B"."""
-    letter = GAME_LETTERS.get(game_type.upper())
-    if letter is None:
+    game = game_for(game_type)
+    if game is None:
         raise ValueError(
-            f"[leagues.{game_type}.{league_number}]: unknown game '{game_type}' (use BRE or FE)"
+            f"[leagues.{game_type}.{league_number}]: unknown game '{game_type}' (use {GAME_NAMES})"
         )
-    return f"{league_number}{letter}"
+    return f"{league_number}{game.letter}"
 
 
 def unprocessed_packets(inbound_dir) -> List[str]:
@@ -65,7 +74,7 @@ def unprocessed_packets(inbound_dir) -> List[str]:
         names = [p.name for p in Path(inbound_dir).iterdir() if p.is_file()]
     except OSError:
         return []
-    return sorted(n for n in names if PACKET_NAME.fullmatch(n) or NODELIST_NAME.fullmatch(n))
+    return sorted(n for n in names if is_packet_name(n) or NODELIST_NAME.fullmatch(n))
 
 
 class ResponseTooLarge(Exception):
@@ -210,8 +219,8 @@ class NovaHubClient:
         if safe_name in (".", "..", ""):
             raise ValueError(f"Invalid filename: {filename}")
 
-        # A packet (555B0102.001) or a nodelist (BRNODES.555, FENODES.013)
-        if not (PACKET_NAME.fullmatch(safe_name) or NODELIST_NAME.fullmatch(safe_name)):
+        # A packet (555B0102.001, L555-1-...-2.brp) or a nodelist (BRNODES.555)
+        if not (is_packet_name(safe_name) or NODELIST_NAME.fullmatch(safe_name)):
             raise ValueError(f"Filename does not match expected format: {filename}")
 
         return safe_name
@@ -336,10 +345,20 @@ class NovaHubClient:
         # Find all packet files
         packet_files = []
         for file in outbound_dir.iterdir():
-            if file.is_file() and self.is_packet_file(
-                file.name, game_type, league_number, league_config
-            ):
+            if not file.is_file():
+                continue
+            if self.is_packet_file(file.name, game_type, league_number, league_config):
                 packet_files.append(file)
+            elif game_type.upper() == "IB" and file.suffix.lower() == ".brp":
+                # The game names a packet without node numbers until it has a
+                # roster, and the hub refuses those; say so, or it sits here.
+                self.log(
+                    "WARNING",
+                    f"Not sending {file.name}: it is not named as a packet from BBS "
+                    f"#{league_config.get('bbs_index')} of league {league_number}. A name "
+                    f"without node numbers means the game has no ibnodes.dat yet.",
+                    league_number,
+                )
 
         if not packet_files:
             self.log("DEBUG", f"No outbound packets in {outbound_dir}", league_number)
@@ -539,7 +558,9 @@ class NovaHubClient:
                 self.metrics["leagues"][f"{game_type}_{league_number}"]["errors"] += 1
                 continue
 
-            success = await self.download_packet(game_type, league_number, filename, inbound_dir)
+            success = await self.download_packet(
+                game_type, league_number, filename, inbound_dir, league_config
+            )
             if success:
                 downloaded += 1
             else:
@@ -574,7 +595,12 @@ class NovaHubClient:
         return []
 
     async def download_packet(
-        self, game_type: str, league_number: str, filename: str, inbound_dir: Path
+        self,
+        game_type: str,
+        league_number: str,
+        filename: str,
+        inbound_dir: Path,
+        league_config: Optional[dict] = None,
     ) -> bool:
         """Download a single packet from the hub.
 
@@ -605,7 +631,17 @@ class NovaHubClient:
                 self.log_api_response(body.decode(errors="replace"), "download error")
             return False
 
-        dest_file = inbound_dir / filename
+        if game_type.upper() == "IB" and NODELIST_NAME.fullmatch(filename):
+            return self.install_roster(league_number, filename, body, league_config or {})
+
+        if not self.write_complete(inbound_dir / filename, body, league_number):
+            return False
+        self.log("INFO", f"Downloaded: {filename} ({len(body)} bytes)", league_number)
+        return True
+
+    def write_complete(self, dest_file: Path, body: bytes, league_number: str) -> bool:
+        """Write body to a .part file and rename it into place, so whatever reads
+        dest_file never sees it half written."""
         part_file = dest_file.with_name(dest_file.name + ".part")
         try:
             part_file.write_bytes(body)
@@ -614,7 +650,37 @@ class NovaHubClient:
             self.log("ERROR", f"Could not write {dest_file}: {e}", league_number)
             part_file.unlink(missing_ok=True)
             return False
-        self.log("INFO", f"Downloaded: {filename} ({len(body)} bytes)", league_number)
+        return True
+
+    def install_roster(
+        self, league_number: str, filename: str, body: bytes, league_config: dict
+    ) -> bool:
+        """IBNODES.<league>, the roster, for an Immortal Barons board that has none.
+
+        The game reads its roster from ibnodes.dat in its data directory, never
+        from inbound, and rewrites that file itself from the Coordinator's
+        signed broadcasts. So the hub's copy is installed only where there is
+        no roster yet; over an existing one it would put an unsigned copy in
+        place of the one the game keeps.
+        """
+        game_folder = league_config.get("game_folder")
+        if not game_folder:
+            self.log(
+                "ERROR",
+                f"Downloaded {filename}, but game_folder is not set, so there is "
+                f"nowhere to install it as ibnodes.dat",
+                league_number,
+            )
+            return False
+
+        dest_file = Path(game_folder) / GAMES["IB"].nodes_file
+        if dest_file.exists():
+            self.log("INFO", f"{filename}: the game has its own ibnodes.dat; left it as it is", league_number)
+            return True
+
+        if not self.write_complete(dest_file, body, league_number):
+            return False
+        self.log("INFO", f"Installed {filename} as {dest_file}", league_number)
         return True
 
     async def handle_sent_file(self, packet_file: Path):
@@ -651,11 +717,21 @@ class NovaHubClient:
         self, filename: str, game_type: str, league_number: str, league_config: dict
     ) -> bool:
         """Check if a file is a valid packet file for this league"""
+        our_bbs_index = league_config.get("bbs_index")
+        if game_type.upper() == "IB":
+            match = IB_PACKET_NAME.fullmatch(filename)
+            return bool(
+                match
+                and match["league"] == league_number
+                and int(match["src"], 36) == our_bbs_index
+            )
+
         # Pattern: <league><game><source><dest>.<seq>
         # Example: 555B0102.001
-        letter = GAME_LETTERS.get(game_type.upper())
-        if letter is None:
+        game = game_for(game_type)
+        if game is None:
             return False
+        letter = game.letter
         pattern = rf"{league_number}{letter}([0-9A-F]{{2}})[0-9A-F]{{2}}\.\d{{3}}"
         match = re.fullmatch(pattern, filename, re.IGNORECASE)
 
@@ -664,7 +740,6 @@ class NovaHubClient:
 
         # Validate that source BBS index matches our league's BBS index
         source_hex = match.group(1).upper()
-        our_bbs_index = league_config.get("bbs_index")
         our_bbs_hex = format(our_bbs_index, "02X") if our_bbs_index else None
 
         return source_hex == our_bbs_hex
@@ -712,9 +787,10 @@ class NovaHubClient:
         """Every league in the config, enabled or not, keyed by hub league id ("015B")."""
         result = {}
         for game_type, leagues in self.config["leagues"].items():
-            letter = GAME_LETTERS.get(game_type.upper())
-            if letter is None:
+            game = game_for(game_type)
+            if game is None:
                 continue
+            letter = game.letter
             for league_number, league_config in leagues.items():
                 result[f"{league_number}{letter}"] = {
                     "section": f"leagues.{game_type}.{league_number}",

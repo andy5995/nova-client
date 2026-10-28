@@ -122,11 +122,36 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/service/api/v1/auth/token")
 PACKET_REGEX = re.compile(
     r"^(\d{3})([BF])([0-9A-F]{2})([0-9A-F]{2})\.(\d{3})$", re.IGNORECASE
 )
+# Immortal Barons, as nova-hub reads it: nodes and sequence in base 36
+IB_PACKET_REGEX = re.compile(
+    r"^L(\d{3})-([1-9A-Z][0-9A-Z]?)-([0-9A-Z]{13})-(0|[1-9A-Z][0-9A-Z]?)\.BRP$", re.IGNORECASE
+)
+GAMES = {"B": "BRE", "F": "FE", "I": "IB"}
+NODELIST_PREFIXES = {"B": "BRNODES", "F": "FENODES", "I": "IBNODES"}
+LEAGUE_ID_PATTERN = r'^\d{3}[BFI]$'
+
+
+def parse_packet_name(filename: str) -> Optional[tuple]:
+    """(league, game letter, source hex, dest hex, sequence), or None."""
+    match = PACKET_REGEX.match(filename)
+    if match:
+        league, game, source, dest, seq = match.groups()
+        return league, game.upper(), source.upper(), dest.upper(), int(seq)
+    match = IB_PACKET_REGEX.match(filename)
+    if match:
+        league, source, seq, dest = match.groups()
+        return (league, "I", format(int(source, 36), "02X"),
+                format(int(dest, 36), "02X"), int(seq, 36))
+    return None
+
+
+def is_nodelist_name(filename: str) -> bool:
+    return any(filename.upper().startswith(p + ".") for p in NODELIST_PREFIXES.values())
 
 
 def parse_league_id(league_id: str) -> tuple:
     """Parse league_id like '555B' into ('555', 'B')."""
-    match = re.match(r'^(\d{3})([BF])$', league_id.upper())
+    match = re.match(r'^(\d{3})([BFI])$', league_id.upper())
     if not match:
         raise HTTPException(400, f"Invalid league_id format: {league_id}")
     return match.groups()
@@ -200,7 +225,7 @@ async def who_am_i(client_info: dict = Depends(verify_token)):
         number, letter = parse_league_id(membership["league_id"])
         leagues.append({
             "league_id": membership["league_id"],
-            "game": "BRE" if letter == "B" else "FE",
+            "game": GAMES[letter],
             "number": number,
             "name": membership["league_id"],
             "bbs_index": membership["bbs_index"],
@@ -214,7 +239,7 @@ async def who_am_i(client_info: dict = Depends(verify_token)):
 
 @service_app.put("/leagues/{league_id}/packets/{filename}", response_model=PacketUploadResponse)
 async def upload_packet(
-    league_id: str = PathParam(..., pattern=r'^\d{3}[BF]$'),
+    league_id: str = PathParam(..., pattern=LEAGUE_ID_PATTERN),
     filename: str = PathParam(...),
     request: Request = None,
     client_info: dict = Depends(verify_token),
@@ -224,15 +249,15 @@ async def upload_packet(
     normalized_filename = filename.upper()
 
     # Block nodelist uploads
-    if normalized_filename.startswith("BRNODES.") or normalized_filename.startswith("FENODES."):
+    if is_nodelist_name(normalized_filename):
         raise HTTPException(403, "Nodelist files cannot be uploaded by clients")
 
     # Parse filename
-    match = PACKET_REGEX.match(normalized_filename)
-    if not match:
+    parsed = parse_packet_name(normalized_filename)
+    if not parsed:
         raise HTTPException(400, f"Invalid packet filename: {normalized_filename}")
 
-    file_league, file_game, source, dest, seq = match.groups()
+    file_league, file_game, source, dest, seq = parsed
 
     # Verify league matches
     if file_league != league_number:
@@ -275,7 +300,7 @@ async def upload_packet(
         "game_type": league_game_type,
         "source": source.upper(),
         "dest": dest.upper(),
-        "sequence": int(seq),
+        "sequence": seq,
         "received_at": datetime.now(),
         "retrieved_at": None,
         "file_size": len(content),
@@ -292,7 +317,7 @@ async def upload_packet(
 
 @service_app.get("/leagues/{league_id}/packets", response_model=PacketListResponse)
 async def list_packets(
-    league_id: str = PathParam(..., pattern=r'^\d{3}[BF]$'),
+    league_id: str = PathParam(..., pattern=LEAGUE_ID_PATTERN),
     unread: bool = Query(False),
     client_info: dict = Depends(verify_token),
 ):
@@ -343,7 +368,7 @@ async def list_packets(
 
 @service_app.get("/leagues/{league_id}/packets/{filename}")
 async def download_packet(
-    league_id: str = PathParam(..., pattern=r'^\d{3}[BF]$'),
+    league_id: str = PathParam(..., pattern=LEAGUE_ID_PATTERN),
     filename: str = PathParam(...),
     client_info: dict = Depends(verify_token),
 ):
@@ -352,7 +377,7 @@ async def download_packet(
     normalized_filename = filename.upper()
 
     # Check if nodelist
-    if normalized_filename.startswith("BRNODES.") or normalized_filename.startswith("FENODES."):
+    if is_nodelist_name(normalized_filename):
         # Return nodelist if available
         if league_id.upper() in storage.nodelists:
             return Response(
@@ -363,11 +388,11 @@ async def download_packet(
         raise HTTPException(404, "Nodelist not found")
 
     # Parse filename
-    match = PACKET_REGEX.match(normalized_filename)
-    if not match:
+    parsed = parse_packet_name(normalized_filename)
+    if not parsed:
         raise HTTPException(400, "Invalid packet filename")
 
-    file_league, file_game, source, dest, seq = match.groups()
+    file_league, file_game, source, dest, seq = parsed
 
     # Find client membership
     membership = None
@@ -379,19 +404,18 @@ async def download_packet(
     if not membership:
         raise HTTPException(403, "Client is not a member of this league")
 
-    # Verify destination
+    # Verify destination. The row says who a packet is for, not the name: an
+    # Immortal Barons broadcast is one file, named for 0, with a row per board.
     expected_dest = format(membership["bbs_index"], "02X")
-    if dest.upper() != expected_dest:
-        raise HTTPException(403, f"Cannot download packets for BBS {dest}")
-
-    # Find packet
     packet = None
     for p in storage.packets:
-        if p["filename"] == normalized_filename:
+        if p["filename"] == normalized_filename and p["dest"] == expected_dest:
             packet = p
             break
 
     if not packet:
+        if dest.upper() != expected_dest:
+            raise HTTPException(403, f"Cannot download packets for BBS {dest}")
         raise HTTPException(404, "Packet not found")
 
     # Mark as downloaded
@@ -406,7 +430,7 @@ async def download_packet(
 
 @service_app.get("/leagues/{league_id}/nodelist")
 async def download_nodelist(
-    league_id: str = PathParam(..., pattern=r'^\d{3}[BF]$'),
+    league_id: str = PathParam(..., pattern=LEAGUE_ID_PATTERN),
     request: Request = None,
     client_info: dict = Depends(verify_token),
 ):
@@ -428,8 +452,7 @@ async def download_nodelist(
         raise HTTPException(404, f"Nodelist not available for league {league_id}")
 
     # Determine filename
-    prefix = "BR" if league_game_type == "B" else "FE"
-    filename = f"{prefix}NODES.{league_number}"
+    filename = f"{NODELIST_PREFIXES[league_game_type]}.{league_number}"
 
     # Mirrors the real hub: ETag plus 304 on a matching If-None-Match. Clients
     # poll far more often than nodelists change, so this is the path they take

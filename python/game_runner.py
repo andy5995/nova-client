@@ -1,15 +1,16 @@
 # game_runner.py
 """
-Cross-platform game runner for BRE and Falcon's Eye.
+Cross-platform game runner for BRE, Falcon's Eye and Immortal Barons.
 
 Handles running game maintenance commands on both Windows (direct .EXE)
-and Linux (via dosemu). Includes locking to prevent concurrent execution
-with automatic queuing.
+and Linux (via dosemu, or directly for a native game). Includes locking to
+prevent concurrent execution with automatic queuing.
 """
 
 import asyncio
 import os
 import platform
+import shlex
 import signal
 import sys
 from dataclasses import dataclass, field
@@ -17,12 +18,29 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, Optional
 
+from games import game_for
+
 
 # cmd.exe (Windows) and COMMAND.COM (the batch file under dosemu) give these
 # a meaning of their own: chaining, redirection, variables. None belongs in a
 # game command or its arguments, and a line break would end the batch line.
 UNSAFE_COMMAND_CHARS = set('&|<>^%"\r\n')
 UNSAFE_PATH_CHARS = set("\r\n")
+
+# How Linux starts a game, as a league's runner setting names it
+RUNNERS = ("native", "dosemu")
+
+
+def default_command(game_type: str) -> tuple:
+    """(game_command, maintenance_args) when the league config gives neither."""
+    game = game_for(game_type)
+    return (game.command, game.maintenance_args) if game else (game_type, "PLANETARY")
+
+
+def runner_for(game_type: str, league_config: dict) -> str:
+    """How Linux starts the game: "native", or "dosemu" for the DOS doors."""
+    game = game_for(game_type)
+    return league_config.get("runner", "native" if game and game.native else "dosemu")
 
 
 def unsafe_chars(value: str, unsafe=UNSAFE_COMMAND_CHARS) -> str:
@@ -32,9 +50,10 @@ def unsafe_chars(value: str, unsafe=UNSAFE_COMMAND_CHARS) -> str:
 
 def check_command(league_config: dict, game_type: str) -> str:
     """Why this league's game command cannot be run safely; "" if it can."""
+    command, args = default_command(game_type)
     for key, default, unsafe in (
-        ("game_command", game_type, UNSAFE_COMMAND_CHARS),
-        ("maintenance_args", "PLANETARY", UNSAFE_COMMAND_CHARS),
+        ("game_command", command, UNSAFE_COMMAND_CHARS),
+        ("maintenance_args", args, UNSAFE_COMMAND_CHARS),
         ("game_dos_path", "", UNSAFE_PATH_CHARS),
     ):
         bad = unsafe_chars(league_config.get(key, default), unsafe)
@@ -147,8 +166,9 @@ class GameRunner:
             )
 
         # Get command configuration
-        game_command = league_config.get("game_command", game_type)
-        maintenance_args = league_config.get("maintenance_args", "PLANETARY")
+        command, args = default_command(game_type)
+        game_command = league_config.get("game_command", command)
+        maintenance_args = league_config.get("maintenance_args", args)
 
         # Build full command string for logging
         full_command = f"{game_command} {maintenance_args}"
@@ -184,6 +204,10 @@ class GameRunner:
             try:
                 if self.is_windows:
                     result = await self._run_windows(
+                        game_folder_path, game_command, maintenance_args, timeout
+                    )
+                elif runner_for(game_type, league_config) == "native":
+                    result = await self._run_native(
                         game_folder_path, game_command, maintenance_args, timeout
                     )
                 else:
@@ -343,6 +367,52 @@ class GameRunner:
             output=result["output"],
             error=result["error"],
             return_code=result["return_code"]
+        )
+
+    async def _run_native(
+        self,
+        game_folder: Path,
+        game_command: str,
+        args: str,
+        timeout: float
+    ) -> GameRunResult:
+        """Run a native game directly, from its game folder, with no shell."""
+        full_cmd = [game_command] + shlex.split(args)
+        if self.verbose:
+            self.log("DEBUG", f"Running: {shlex.join(full_cmd)} in {game_folder}")
+
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *full_cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+                cwd=str(game_folder.resolve()),
+            )
+        except OSError as e:
+            return GameRunResult(
+                success=False, game_type="", league_id="", command="",
+                error=f"Could not start {game_command}: {e}", return_code=-1,
+            )
+
+        try:
+            stdout, _ = await asyncio.wait_for(process.communicate(), timeout=timeout)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            self._kill_tree(process.pid)
+            await process.wait()
+            raise
+
+        output = stdout.decode(errors="replace") if stdout else ""
+        return_code = process.returncode if process.returncode is not None else -1
+        error = ""
+        if return_code != 0:
+            # The game's last lines say why, on one line for the journal.
+            error = f"Exit code: {return_code}"
+            lines = [ln.strip() for ln in output.splitlines() if ln.strip()]
+            if lines:
+                error += " - " + " | ".join(lines[-3:])[:500]
+        return GameRunResult(
+            success=return_code == 0, game_type="", league_id="", command="",
+            output=output, error=error, return_code=return_code,
         )
 
     async def _run_linux_dosemu(
