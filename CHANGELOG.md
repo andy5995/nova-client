@@ -7,6 +7,15 @@ Python-only release, which is the code that had been running in production.
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-10-28
+
+Linux nodes whose BBS runs its games from a redirected DOS drive can now run maintenance.
+
+### Upgrading
+
+Nothing to do unless you need the new setting: no dependency, config or unit changes. On
+Linux, rebuild nothing; check the config with `daemon.py --validate` after pulling, as usual.
+
 ### Added
 
 - `[daemon] dosemu_drives` (Linux): DOS drives mapped with lredir for maintenance runs, for
